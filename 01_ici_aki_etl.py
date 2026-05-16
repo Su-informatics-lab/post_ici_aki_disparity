@@ -514,10 +514,14 @@ print("=" * 70)
 
 demo_sql = f"""
 SELECT
-  person_id,
-  CASE gender_concept_id
-    WHEN 8507 THEN 'Male'
-    WHEN 8532 THEN 'Female'
+  p.person_id,
+  p.gender_concept_id,
+  p.sex_at_birth_concept_id,
+  CASE
+    WHEN p.sex_at_birth_concept_id IN (45878463, 1585847) THEN 'Female'
+    WHEN p.sex_at_birth_concept_id IN (45880669, 1585846) THEN 'Male'
+    WHEN p.gender_concept_id = 8532 THEN 'Female'
+    WHEN p.gender_concept_id = 8507 THEN 'Male'
     ELSE 'Other'
   END AS sex_at_birth,
   CASE race_concept_id
@@ -532,10 +536,23 @@ SELECT
     ELSE 'Other'
   END AS ethnicity,
   year_of_birth
-FROM `{CDR}`.person
+FROM `{CDR}`.person p
 WHERE person_id IN ({','.join(map(str, eligible.person_id.tolist()))})
 """
 demo = query(demo_sql, "Demographics")
+
+# Diagnostic: show actual sex concept IDs
+print(f"  gender_concept_id values: {demo.gender_concept_id.value_counts().to_dict()}")
+print(f"  sex_at_birth_concept_id values: {demo.sex_at_birth_concept_id.value_counts().to_dict()}")
+
+# If sex is still all "Other", fall back to sex_at_birth_concept_id survey
+if (demo["sex_at_birth"] == "Other").all():
+    print("  ⚠ sex_at_birth all 'Other' — using sex_at_birth_concept_id directly")
+    # Try the most common non-zero values
+    top_sex = demo["sex_at_birth_concept_id"].value_counts()
+    print(f"  Top sex_at_birth_concept_id: {top_sex.head(5).to_dict()}")
+
+demo.drop(columns=["gender_concept_id", "sex_at_birth_concept_id"], inplace=True)
 demo = demo.merge(eligible[["person_id", "ici_index_date"]], on="person_id")
 demo["age_at_ici"] = (
     pd.to_datetime(demo["ici_index_date"]).dt.year - demo["year_of_birth"]
@@ -897,6 +914,12 @@ sdoh = sdoh.merge(emp[["person_id", "employment"]], on="person_id", how="left")
 sdoh = sdoh.merge(housing[["person_id", "housing"]], on="person_id", how="left")
 sdoh = sdoh.merge(stability[["person_id", "housing_stability"]], on="person_id", how="left")
 sdoh = sdoh.merge(disability[["person_id", "disability_mobility"]], on="person_id", how="left")
+# Convert any integer columns to string before fillna
+for col in sdoh.columns:
+    if col == "person_id":
+        continue
+    if sdoh[col].dtype in ["Int64", "int64", "Int32", "int32", "float64", "Float64"]:
+        sdoh[col] = sdoh[col].astype("object")
 sdoh = sdoh.fillna("Missing")
 
 print(f"\n  SDoH summary:")
