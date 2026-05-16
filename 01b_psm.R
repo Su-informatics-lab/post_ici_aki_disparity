@@ -16,6 +16,13 @@
 # ══════════════════════════════════════════════════════════════════════
 
 suppressPackageStartupMessages({
+  # Auto-install missing packages
+  required <- c("MatchIt", "cobalt", "dplyr", "readr", "survival")
+  missing <- required[!required %in% installed.packages()[, "Package"]]
+  if (length(missing) > 0) {
+    cat("  Installing:", paste(missing, collapse = ", "), "\n")
+    install.packages(missing, repos = "https://cloud.r-project.org", quiet = TRUE)
+  }
   library(MatchIt)
   library(cobalt)
   library(dplyr)

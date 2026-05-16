@@ -19,6 +19,12 @@
 # ══════════════════════════════════════════════════════════════════════
 
 suppressPackageStartupMessages({
+  required <- c("survival", "dplyr", "readr", "sandwich", "lmtest")
+  missing <- required[!required %in% installed.packages()[, "Package"]]
+  if (length(missing) > 0) {
+    cat("  Installing:", paste(missing, collapse = ", "), "\n")
+    install.packages(missing, repos = "https://cloud.r-project.org", quiet = TRUE)
+  }
   library(survival)
   library(dplyr)
   library(readr)
