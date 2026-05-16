@@ -19,11 +19,15 @@
 # ══════════════════════════════════════════════════════════════════════
 
 suppressPackageStartupMessages({
+  user_lib <- Sys.getenv("R_LIBS_USER", paste0(Sys.getenv("HOME"), "/R/library"))
+  dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+  .libPaths(c(user_lib, .libPaths()))
+
   required <- c("survival", "dplyr", "readr", "sandwich", "lmtest")
   missing <- required[!required %in% installed.packages()[, "Package"]]
   if (length(missing) > 0) {
     cat("  Installing:", paste(missing, collapse = ", "), "\n")
-    install.packages(missing, repos = "https://cloud.r-project.org", quiet = TRUE)
+    install.packages(missing, lib = user_lib, repos = "https://cloud.r-project.org", quiet = TRUE)
   }
   library(survival)
   library(dplyr)
