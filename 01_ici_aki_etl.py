@@ -420,15 +420,22 @@ print(f"  Patients with follow-up Cr [1-365d]: {len(pts_with_followup):,}")
 cr_followup = cr_followup.merge(cr_baseline, on="person_id")
 cr_followup["cr_ratio"] = cr_followup["cr_value"] / cr_followup["baseline_cr"]
 
-# AKI = any follow-up Cr >= 2.0x baseline (KDIGO Stage 2+)
-aki_pts = cr_followup[cr_followup["cr_ratio"] >= 2.0].person_id.unique()
+# AKI = any follow-up Cr >= 1.5x baseline (KDIGO Stage 1+) — PRIMARY
+aki_pts = cr_followup[cr_followup["cr_ratio"] >= 1.5].person_id.unique()
 
-# Also compute max ratio per patient for sensitivity analyses
-max_ratio = cr_followup.groupby("person_id").agg(
+# Also compute max ratio AND max delta per patient for sensitivity analyses
+max_stats = cr_followup.groupby("person_id").agg(
     max_cr_ratio=("cr_ratio", "max"),
     max_cr_value=("cr_value", "max"),
     n_followup_cr=("cr_value", "count"),
 ).reset_index()
+
+# Max delta Cr (absolute change) per patient
+cr_followup["delta_cr"] = cr_followup["cr_value"] - cr_followup["baseline_cr"]
+max_delta = cr_followup.groupby("person_id").agg(
+    max_delta_cr=("delta_cr", "max"),
+).reset_index()
+max_stats = max_stats.merge(max_delta, on="person_id", how="left")
 
 # ── 1h. Exclude patients without baseline OR follow-up Cr ─────────
 eligible = cohort[
@@ -449,32 +456,44 @@ print(f"  Excluded (baseline Cr >= 4.0): {n_high_baseline:,}")
 
 # ── 1i. Build final cohort with outcome ──────────────────────────
 eligible["severity"] = eligible.person_id.isin(aki_pts).astype(int)
-eligible = eligible.merge(max_ratio, on="person_id", how="left")
+eligible = eligible.merge(max_stats, on="person_id", how="left")
 eligible = eligible.merge(ici_regimen, on="person_id", how="left")
 
 n_cases = eligible.severity.sum()
 n_controls = len(eligible) - n_cases
 print(f"\n  ┌─────────────────────────────────────────┐")
 print(f"  │  FINAL COHORT: {len(eligible):,} patients          │")
-print(f"  │  AKI Cases (Cr ≥2.0x): {n_cases:,}              │")
+print(f"  │  AKI Cases (Cr ≥1.5×): {n_cases:,}             │")
 print(f"  │  Controls (no AKI):    {n_controls:,}              │")
 print(f"  │  AKI rate: {n_cases/len(eligible)*100:.1f}%                       │")
 print(f"  │  ICI regimen: {eligible.ici_regimen.value_counts().to_dict()} │")
 print(f"  └─────────────────────────────────────────┘")
 
 # Sensitivity flags
-eligible["aki_kdigo1"] = eligible.person_id.isin(
-    cr_followup[cr_followup["cr_ratio"] >= 1.5].person_id.unique()
+# S1: ΔCr ≥0.3 mg/dL (KDIGO Stage 1a, most sensitive)
+eligible["aki_delta03"] = (eligible["max_delta_cr"] >= 0.3).astype(int)
+
+# S2: Cr ≥2.0× baseline (KDIGO Stage 2, moderate-severe)
+eligible["aki_kdigo2"] = eligible.person_id.isin(
+    cr_followup[cr_followup["cr_ratio"] >= 2.0].person_id.unique()
 ).astype(int)
+
+# S3: Cr ≥3.0× baseline (KDIGO Stage 3, severe)
 eligible["aki_kdigo3"] = eligible.person_id.isin(
     cr_followup[cr_followup["cr_ratio"] >= 3.0].person_id.unique()
 ).astype(int)
 
-# 180-day window AKI
+# S4: 180-day window AKI (primary threshold ≥1.5×)
 cr_180 = cr_followup[cr_followup["days_from_index"] <= 180]
 eligible["aki_180d"] = eligible.person_id.isin(
-    cr_180[cr_180["cr_ratio"] >= 2.0].person_id.unique()
+    cr_180[cr_180["cr_ratio"] >= 1.5].person_id.unique()
 ).astype(int)
+
+print(f"\n  Sensitivity flag counts:")
+print(f"    S1 ΔCr≥0.3:   {eligible.aki_delta03.sum():,} ({eligible.aki_delta03.mean()*100:.1f}%)")
+print(f"    S2 ≥2.0×:     {eligible.aki_kdigo2.sum():,} ({eligible.aki_kdigo2.mean()*100:.1f}%)")
+print(f"    S3 ≥3.0×:     {eligible.aki_kdigo3.sum():,} ({eligible.aki_kdigo3.mean()*100:.1f}%)")
+print(f"    S4 180d ≥1.5×: {eligible.aki_180d.sum():,} ({eligible.aki_180d.mean()*100:.1f}%)")
 
 save(eligible, "01_ici_cohort.csv")
 
@@ -1048,7 +1067,7 @@ print("=" * 70)
 
 reg = eligible[["person_id", "severity", "ici_index_date", "ici_regimen",
                 "baseline_cr", "max_cr_ratio",
-                "aki_kdigo1", "aki_kdigo3", "aki_180d"]].copy()
+                "aki_delta03", "aki_kdigo2", "aki_kdigo3", "aki_180d"]].copy()
 reg = reg.merge(demo[["person_id","sex_at_birth","race","ethnicity","age_group"]], on="person_id")
 reg = reg.merge(charlson, on="person_id")
 reg = reg.merge(covariates, on="person_id")
