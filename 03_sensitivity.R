@@ -63,17 +63,35 @@ if (has_ici) regression_bm$f.ici <- factor(regression_bm$ici_regimen,
                    levels = c("anti_pd1", "anti_pdl1", "anti_ctla4",
                               "anti_lag3", "combination"))
 
-# NCI-CCI conditions
-como <- c("Acute_MI", "History_MI", "Congestive_Heart_Failure",
-          "Peripheral_Vascular_Disease", "Cerebrovascular_Disease",
-          "Chronic_Pulmonary_Disease", "Dementia", "Paralysis",
-          "Diabetes", "Diabetes_Complicated", "Renal_Disease",
-          "Liver_Disease_Mild", "Liver_Disease_Moderate_Severe",
-          "Peptic_Ulcer_Disease", "Rheumatic_Disease", "AIDS")
-como <- como[como %in% names(regression_bm)]
+# NCI-CCI: use score if available
+if ("nci_cci_score" %in% names(regression_bm)) {
+  como_terms <- "nci_cci_score"
+} else {
+  como <- c("Acute_MI", "History_MI", "Congestive_Heart_Failure",
+            "Peripheral_Vascular_Disease", "Cerebrovascular_Disease",
+            "Chronic_Pulmonary_Disease", "Dementia", "Paralysis",
+            "Diabetes", "Diabetes_Complicated", "Renal_Disease",
+            "Liver_Disease_Mild", "Liver_Disease_Moderate_Severe",
+            "Peptic_Ulcer_Disease", "Rheumatic_Disease", "AIDS")
+  como_terms <- como[como %in% names(regression_bm)]
+}
 
 nephro <- c("ppi_flag", "nsaid_flag", "acei_arb_flag", "diuretic_flag")
 nephro <- nephro[nephro %in% names(regression_bm)]
+
+# Collapsed factors
+if (has_cancer) {
+  if ("cancer_type_collapsed" %in% names(regression_bm)) {
+    regression_bm$f.cancer <- factor(regression_bm$cancer_type_collapsed,
+                     levels = c("Lung", "Melanoma", "Other"))
+  }
+}
+if (has_ici) {
+  if ("ici_collapsed" %in% names(regression_bm)) {
+    regression_bm$f.ici <- factor(regression_bm$ici_collapsed,
+                     levels = c("anti_pd1", "other_combo"))
+  }
+}
 
 # Base formula components
 base_terms <- c("f.sex", "f.age")
@@ -81,7 +99,9 @@ if (has_race) base_terms <- c(base_terms, "f.race")
 if (has_ethnicity) base_terms <- c(base_terms, "f.ethnicity")
 if (has_cancer) base_terms <- c(base_terms, "f.cancer")
 if (has_ici) base_terms <- c(base_terms, "f.ici")
-base_terms <- c(base_terms, como, nephro)
+base_terms <- c(base_terms, como_terms, nephro)
+
+cat("  Simplified base terms:", length(base_terms), "\n")
 
 
 # ── Helper ───────────────────────────────────────────────────────
@@ -180,43 +200,8 @@ if ("aki_180d" %in% names(regression_bm)) {
 # ══════════════════════════════════════════════════════════════════════
 if ("Renal_Disease" %in% names(regression_bm)) {
   s5_data <- regression_bm %>% filter(Renal_Disease == 0)
-  como_s5 <- setdiff(como, "Renal_Disease")
-  base_terms_s5 <- c("f.sex", "f.age")
-  if (has_race) base_terms_s5 <- c(base_terms_s5, "f.race")
-  if (has_ethnicity) base_terms_s5 <- c(base_terms_s5, "f.ethnicity")
-  if (has_cancer) base_terms_s5 <- c(base_terms_s5, "f.cancer")
-  if (has_ici) base_terms_s5 <- c(base_terms_s5, "f.ici")
-  base_terms_s5 <- c(base_terms_s5, como_s5, nephro)
-
-  cat("\n", rep("=", 60), "\n", sep = "")
-  cat("SENSITIVITY: S5_no_CKD\n")
-  cat("  N=", nrow(s5_data), "\n")
-
-  rhs_s5 <- paste(c(base_terms_s5, "strata(stratum)"), collapse = " + ")
-  f_s5 <- as.formula(
-    paste("Surv(rep(1, nrow(s5_data)), Treatment) ~", rhs_s5)
-  )
-  fit_s5 <- tryCatch(
-    coxph(f_s5, data = s5_data, method = "exact"),
-    error = function(e) { cat("  ERROR:", e$message, "\n"); NULL }
-  )
-  if (!is.null(fit_s5)) {
-    s_s5 <- summary(fit_s5)
-    s5_coefs <- data.frame(
-      variable = rownames(s_s5$coefficients),
-      coef = s_s5$coefficients[, "coef"],
-      exp_coef = s_s5$coefficients[, "exp(coef)"],
-      se = s_s5$coefficients[, "se(coef)"],
-      z = s_s5$coefficients[, "z"],
-      p = s_s5$coefficients[, "Pr(>|z|)"],
-      lower95 = s_s5$conf.int[, "lower .95"],
-      upper95 = s_s5$conf.int[, "upper .95"],
-      model = "S5_no_CKD",
-      stringsAsFactors = FALSE, row.names = NULL
-    )
-    write_csv(s5_coefs, file.path(RESULTS, "sensitivity_S5_no_CKD_coefficients.csv"))
-    cat("  Saved: sensitivity_S5_no_CKD_coefficients.csv\n")
-  }
+  # With NCI-CCI score, no formula modification needed — just filter
+  s5_coefs <- run_sensitivity(s5_data, "S5_no_CKD")
 }
 
 # ══════════════════════════════════════════════════════════════════════

@@ -80,33 +80,61 @@ if (has_ici) regression_bm$f.ici <- factor(regression_bm$ici_regimen,
                    levels = c("anti_pd1", "anti_pdl1", "anti_ctla4",
                               "anti_lag3", "combination"))
 
-# ── NCI-CCI comorbidity columns (14 conditions) ─────────────────
-# Note: NO Malignancy, NO Metastatic_Solid_Tumor, NO standalone HIV
-como <- c("Acute_MI", "History_MI",
-          "Congestive_Heart_Failure",
-          "Peripheral_Vascular_Disease", "Cerebrovascular_Disease",
-          "Chronic_Pulmonary_Disease", "Dementia", "Paralysis",
-          "Diabetes", "Diabetes_Complicated",
-          "Renal_Disease",
-          "Liver_Disease_Mild", "Liver_Disease_Moderate_Severe",
-          "Peptic_Ulcer_Disease", "Rheumatic_Disease", "AIDS")
+# ── NCI-CCI: use SCORE (1 continuous term) instead of 16 flags ───
+# This reduces 16 df to 1 df — critical for EPV with N=127 cases
+cat("  Using NCI-CCI score (continuous) instead of individual flags\n")
 
-# Verify NCI-CCI columns exist; drop missing ones silently
-como <- como[como %in% names(regression_bm)]
-cat("  NCI-CCI conditions:", length(como), "\n")
+# Collapsed cancer type (3 groups instead of 10)
+if (has_cancer) {
+  if ("cancer_type_collapsed" %in% names(regression_bm)) {
+    regression_bm$f.cancer <- factor(regression_bm$cancer_type_collapsed,
+                     levels = c("Lung", "Melanoma", "Other"))
+  } else {
+    regression_bm$f.cancer <- factor(regression_bm$cancer_type,
+                     levels = c("Lung", "Melanoma", "Renal_Cell", "Urothelial",
+                                "Head_Neck", "Breast", "Hepatocellular",
+                                "Colorectal", "Other_Solid", "Hematologic", "Unknown"))
+  }
+}
 
-# Nephrotoxin flags
+# Collapsed ICI regimen (2 groups instead of 5)
+if (has_ici) {
+  if ("ici_collapsed" %in% names(regression_bm)) {
+    regression_bm$f.ici <- factor(regression_bm$ici_collapsed,
+                     levels = c("anti_pd1", "other_combo"))
+  } else {
+    regression_bm$f.ici <- factor(regression_bm$ici_regimen,
+                     levels = c("anti_pd1", "anti_pdl1", "anti_ctla4",
+                                "anti_lag3", "combination"))
+  }
+}
+
+# Nephrotoxin flags (4 binary terms)
 nephro <- c("ppi_flag", "nsaid_flag", "acei_arb_flag", "diuretic_flag")
 nephro <- nephro[nephro %in% names(regression_bm)]
 cat("  Nephrotoxin flags:", length(nephro), "\n")
 
 # ── Build base formula ───────────────────────────────────────────
+# Simplified: ~17 terms instead of ~42
 base_terms <- c("f.sex", "f.age")
 if (has_race) base_terms <- c(base_terms, "f.race")
 if (has_ethnicity) base_terms <- c(base_terms, "f.ethnicity")
 if (has_cancer) base_terms <- c(base_terms, "f.cancer")
 if (has_ici) base_terms <- c(base_terms, "f.ici")
-base_terms <- c(base_terms, como, nephro)
+if ("nci_cci_score" %in% names(regression_bm)) {
+  base_terms <- c(base_terms, "nci_cci_score")
+} else {
+  # Fallback: individual flags if score not available
+  como <- c("Acute_MI", "History_MI", "Congestive_Heart_Failure",
+            "Peripheral_Vascular_Disease", "Cerebrovascular_Disease",
+            "Chronic_Pulmonary_Disease", "Dementia", "Paralysis",
+            "Diabetes", "Diabetes_Complicated", "Renal_Disease",
+            "Liver_Disease_Mild", "Liver_Disease_Moderate_Severe",
+            "Peptic_Ulcer_Disease", "Rheumatic_Disease", "AIDS")
+  como <- como[como %in% names(regression_bm)]
+  base_terms <- c(base_terms, como)
+}
+base_terms <- c(base_terms, nephro)
 
 base_rhs <- paste(c(base_terms, "strata(stratum)"), collapse = " + ")
 base_formula <- as.formula(paste("Surv(rep(1, nrow(regression_bm)), Treatment) ~",

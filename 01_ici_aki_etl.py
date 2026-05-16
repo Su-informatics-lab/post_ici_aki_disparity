@@ -34,7 +34,6 @@ import warnings
 
 warnings.filterwarnings("ignore", message=".*read_gbq is deprecated.*")
 
-import numpy as np
 import pandas as pd
 
 CDR = os.environ["WORKSPACE_CDR"]
@@ -103,10 +102,19 @@ print("=" * 70)
 # ── 1a. Find all patients with ICI drug exposures ─────────────────
 # Use name-based matching (proven in recon) instead of hardcoded concept IDs
 ICI_DRUG_NAMES = [
-    "nivolumab", "pembrolizumab", "cemiplimab", "dostarlimab",
-    "retifanlimab", "toripalimab", "tislelizumab",
-    "atezolizumab", "durvalumab", "avelumab",
-    "ipilimumab", "tremelimumab", "relatlimab",
+    "nivolumab",
+    "pembrolizumab",
+    "cemiplimab",
+    "dostarlimab",
+    "retifanlimab",
+    "toripalimab",
+    "tislelizumab",
+    "atezolizumab",
+    "durvalumab",
+    "avelumab",
+    "ipilimumab",
+    "tremelimumab",
+    "relatlimab",
 ]
 ICI_LIKE_SQL = " OR ".join(
     [f"LOWER(c.concept_name) LIKE '%{d}%'" for d in ICI_DRUG_NAMES]
@@ -114,12 +122,19 @@ ICI_LIKE_SQL = " OR ".join(
 
 # Map drug names to ICI class for regimen classification
 ICI_NAME_TO_CLASS = {}
-for d in ["nivolumab","pembrolizumab","cemiplimab","dostarlimab",
-          "retifanlimab","toripalimab","tislelizumab"]:
+for d in [
+    "nivolumab",
+    "pembrolizumab",
+    "cemiplimab",
+    "dostarlimab",
+    "retifanlimab",
+    "toripalimab",
+    "tislelizumab",
+]:
     ICI_NAME_TO_CLASS[d] = "anti_pd1"
-for d in ["atezolizumab","durvalumab","avelumab"]:
+for d in ["atezolizumab", "durvalumab", "avelumab"]:
     ICI_NAME_TO_CLASS[d] = "anti_pdl1"
-for d in ["ipilimumab","tremelimumab"]:
+for d in ["ipilimumab", "tremelimumab"]:
     ICI_NAME_TO_CLASS[d] = "anti_ctla4"
 ICI_NAME_TO_CLASS["relatlimab"] = "anti_lag3"
 
@@ -141,12 +156,14 @@ print(f"  Unique patients with any ICI: {ici_raw.person_id.nunique():,}")
 if len(ici_raw) == 0:
     print("\n  ⚠ FATAL: No ICI exposures found. Check CDR version.")
     print("  Run 00_recon_feasibility.py first to verify concept names.")
-    import sys; sys.exit(1)
+    import sys
+
+    sys.exit(1)
 
 # Index date = first ICI exposure
-ici_index = ici_raw.groupby("person_id").agg(
-    ici_index_date=("ici_date", "min")
-).reset_index()
+ici_index = (
+    ici_raw.groupby("person_id").agg(ici_index_date=("ici_date", "min")).reset_index()
+)
 ici_index["ici_index_date"] = pd.to_datetime(ici_index["ici_index_date"])
 print(f"  Patients with ICI index date: {len(ici_index):,}")
 
@@ -156,6 +173,7 @@ ici_raw = ici_raw.merge(ici_index, on="person_id")
 ici_raw["days_from_index"] = (ici_raw["ici_date"] - ici_raw["ici_index_date"]).dt.days
 ici_window = ici_raw[ici_raw["days_from_index"] <= 30].copy()
 
+
 # Classify each row's ICI class from drug_name
 def get_ici_class(drug_name):
     for key, cls in ICI_NAME_TO_CLASS.items():
@@ -163,7 +181,9 @@ def get_ici_class(drug_name):
             return cls
     return "unknown"
 
+
 ici_window["ici_class"] = ici_window["drug_name"].apply(get_ici_class)
+
 
 def classify_regimen(group):
     classes = set(group["ici_class"]) - {"unknown"}
@@ -173,6 +193,7 @@ def classify_regimen(group):
         return "combination"
     return classes.pop()
 
+
 ici_regimen = ici_window.groupby("person_id").apply(classify_regimen).reset_index()
 ici_regimen.columns = ["person_id", "ici_regimen"]
 print(f"  ICI regimen: {ici_regimen.ici_regimen.value_counts().to_dict()}")
@@ -180,8 +201,10 @@ print(f"  ICI regimen: {ici_regimen.ici_regimen.value_counts().to_dict()}")
 # ── 1c. Cancer diagnosis requirement ─────────────────────────────
 # Any cancer diagnosis (C00-C96) before or within 30 days of ICI index
 cancer_prefix_clauses = " OR ".join(
-    [f"STARTS_WITH(UPPER(REPLACE(c.concept_code,'.','')),'C{i:02d}')"
-     for i in range(97)]
+    [
+        f"STARTS_WITH(UPPER(REPLACE(c.concept_code,'.','')),'C{i:02d}')"
+        for i in range(97)
+    ]
 )
 cancer_sql = f"""
 SELECT DISTINCT co.person_id
@@ -214,8 +237,10 @@ print(f"  After survey filter: {len(cohort):,}")
 
 # ── 1e. Exclude pre-existing ESKD / dialysis / transplant ─────────
 eskd_clauses = " OR ".join(
-    [f"STARTS_WITH(UPPER(REPLACE(c.concept_code,'.','')),'{code}')"
-     for code in ESKD_EXCLUDE_CODES]
+    [
+        f"STARTS_WITH(UPPER(REPLACE(c.concept_code,'.','')),'{code}')"
+        for code in ESKD_EXCLUDE_CODES
+    ]
 )
 eskd_sql = f"""
 SELECT DISTINCT co.person_id
@@ -307,6 +332,7 @@ print(f"  Patients with any Cr: {cr_all.person_id.nunique():,}")
 # OMOP unit_concept_id: 8840 = mg/dL, 8749 = µmol/L
 UMOL_TO_MGDL = 0.0113  # 1 µmol/L = 0.0113 mg/dL
 
+
 def convert_cr(row):
     val = row["cr_value"]
     unit_id = row.get("unit_concept_id", None)
@@ -331,16 +357,22 @@ def convert_cr(row):
 
     return val  # assume mg/dL
 
+
 cr_all["cr_mgdl"] = cr_all.apply(convert_cr, axis=1)
 
 # Report conversion stats
-n_converted = ((cr_all["cr_value"] != cr_all["cr_mgdl"]) &
-               (cr_all["cr_mgdl"] > 0)).sum()
-print(f"  Cr unit conversions (µmol/L → mg/dL): {n_converted:,} "
-      f"({n_converted/len(cr_all)*100:.1f}%)")
-print(f"  Cr (mg/dL) median: {cr_all['cr_mgdl'].median():.2f}, "
-      f"IQR: {cr_all['cr_mgdl'].quantile(0.25):.2f}–"
-      f"{cr_all['cr_mgdl'].quantile(0.75):.2f}")
+n_converted = (
+    (cr_all["cr_value"] != cr_all["cr_mgdl"]) & (cr_all["cr_mgdl"] > 0)
+).sum()
+print(
+    f"  Cr unit conversions (µmol/L → mg/dL): {n_converted:,} "
+    f"({n_converted/len(cr_all)*100:.1f}%)"
+)
+print(
+    f"  Cr (mg/dL) median: {cr_all['cr_mgdl'].median():.2f}, "
+    f"IQR: {cr_all['cr_mgdl'].quantile(0.25):.2f}–"
+    f"{cr_all['cr_mgdl'].quantile(0.75):.2f}"
+)
 
 # Apply plausibility filter on converted values
 cr_all = cr_all[(cr_all["cr_mgdl"] > 0.1) & (cr_all["cr_mgdl"] < 30)].copy()
@@ -355,19 +387,27 @@ ED_VISITS = [9203]
 INPATIENT_VISITS = [9201, 32037, 262, 8717]
 
 cr_all["visit_setting"] = "unknown"
-cr_all.loc[cr_all["visit_concept_id"].isin(OUTPATIENT_VISITS), "visit_setting"] = "outpatient"
+cr_all.loc[cr_all["visit_concept_id"].isin(OUTPATIENT_VISITS), "visit_setting"] = (
+    "outpatient"
+)
 cr_all.loc[cr_all["visit_concept_id"].isin(ED_VISITS), "visit_setting"] = "ed"
-cr_all.loc[cr_all["visit_concept_id"].isin(INPATIENT_VISITS), "visit_setting"] = "inpatient"
+cr_all.loc[cr_all["visit_concept_id"].isin(INPATIENT_VISITS), "visit_setting"] = (
+    "inpatient"
+)
 
 print(f"  Visit setting distribution:")
 print(f"    {cr_all.visit_setting.value_counts().to_dict()}")
 
-cr_all.drop(columns=["cr_mgdl", "unit_concept_id", "unit_source_value",
-                      "visit_concept_id"], inplace=True)
+cr_all.drop(
+    columns=["cr_mgdl", "unit_concept_id", "unit_source_value", "visit_concept_id"],
+    inplace=True,
+)
 
 # Merge index date
 cr_all = cr_all.merge(cohort[["person_id", "ici_index_date"]], on="person_id")
-cr_all["days_from_index"] = (cr_all["measurement_date"] - cr_all["ici_index_date"]).dt.days
+cr_all["days_from_index"] = (
+    cr_all["measurement_date"] - cr_all["ici_index_date"]
+).dt.days
 
 # ── Baseline Cr: THREE approaches ─────────────────────────────────
 # Window: [-365d, -7d] for primary; [-365d, -1d] for sensitivity
@@ -383,10 +423,14 @@ cr_baseline_window_sens = cr_all[
 cr_outpatient = cr_baseline_window[
     cr_baseline_window["visit_setting"].isin(["outpatient", "unknown"])
 ]
-baseline_median = cr_outpatient.groupby("person_id").agg(
-    baseline_cr=("cr_value", "median"),
-    n_baseline_cr=("cr_value", "count"),
-).reset_index()
+baseline_median = (
+    cr_outpatient.groupby("person_id")
+    .agg(
+        baseline_cr=("cr_value", "median"),
+        n_baseline_cr=("cr_value", "count"),
+    )
+    .reset_index()
+)
 
 # SENSITIVITY A: Most recent Cr in [-365d, -1d] (AlcRx approach)
 baseline_recent = cr_baseline_window_sens.sort_values("measurement_date")
@@ -396,9 +440,13 @@ baseline_recent = baseline_recent[["person_id", "cr_value"]].rename(
 )
 
 # SENSITIVITY B: Nadir (lowest) Cr in [-365d, -7d] (Cortazar/ICPi-AKI)
-baseline_nadir = cr_baseline_window.groupby("person_id").agg(
-    baseline_cr_nadir=("cr_value", "min"),
-).reset_index()
+baseline_nadir = (
+    cr_baseline_window.groupby("person_id")
+    .agg(
+        baseline_cr_nadir=("cr_value", "min"),
+    )
+    .reset_index()
+)
 
 # Merge all baseline approaches
 cr_baseline = baseline_median.merge(baseline_recent, on="person_id", how="outer")
@@ -431,26 +479,36 @@ cr_followup["cr_ratio"] = cr_followup["cr_value"] / cr_followup["baseline_cr"]
 aki_pts = cr_followup[cr_followup["cr_ratio"] >= 1.5].person_id.unique()
 
 # Also compute max ratio AND max delta per patient for sensitivity analyses
-max_stats = cr_followup.groupby("person_id").agg(
-    max_cr_ratio=("cr_ratio", "max"),
-    max_cr_value=("cr_value", "max"),
-    n_followup_cr=("cr_value", "count"),
-).reset_index()
+max_stats = (
+    cr_followup.groupby("person_id")
+    .agg(
+        max_cr_ratio=("cr_ratio", "max"),
+        max_cr_value=("cr_value", "max"),
+        n_followup_cr=("cr_value", "count"),
+    )
+    .reset_index()
+)
 
 # Max delta Cr (absolute change) per patient
 cr_followup["delta_cr"] = cr_followup["cr_value"] - cr_followup["baseline_cr"]
-max_delta = cr_followup.groupby("person_id").agg(
-    max_delta_cr=("delta_cr", "max"),
-).reset_index()
+max_delta = (
+    cr_followup.groupby("person_id")
+    .agg(
+        max_delta_cr=("delta_cr", "max"),
+    )
+    .reset_index()
+)
 max_stats = max_stats.merge(max_delta, on="person_id", how="left")
 
 # ── 1h. Exclude patients without baseline OR follow-up Cr ─────────
 eligible = cohort[
-    (cohort.person_id.isin(cr_baseline.person_id)) &
-    (cohort.person_id.isin(pts_with_followup))
+    (cohort.person_id.isin(cr_baseline.person_id))
+    & (cohort.person_id.isin(pts_with_followup))
 ].copy()
 n_no_baseline = len(cohort) - len(cohort[cohort.person_id.isin(cr_baseline.person_id)])
-n_no_followup = len(cohort[cohort.person_id.isin(cr_baseline.person_id)]) - len(eligible)
+n_no_followup = len(cohort[cohort.person_id.isin(cr_baseline.person_id)]) - len(
+    eligible
+)
 print(f"\n  Excluded (no baseline Cr): {n_no_baseline:,}")
 print(f"  Excluded (no follow-up Cr): {n_no_followup:,}")
 print(f"  Final eligible cohort: {len(eligible):,}")
@@ -497,10 +555,18 @@ eligible["aki_180d"] = eligible.person_id.isin(
 ).astype(int)
 
 print(f"\n  Sensitivity flag counts:")
-print(f"    S1 ΔCr≥0.3:   {eligible.aki_delta03.sum():,} ({eligible.aki_delta03.mean()*100:.1f}%)")
-print(f"    S2 ≥2.0×:     {eligible.aki_kdigo2.sum():,} ({eligible.aki_kdigo2.mean()*100:.1f}%)")
-print(f"    S3 ≥3.0×:     {eligible.aki_kdigo3.sum():,} ({eligible.aki_kdigo3.mean()*100:.1f}%)")
-print(f"    S4 180d ≥1.5×: {eligible.aki_180d.sum():,} ({eligible.aki_180d.mean()*100:.1f}%)")
+print(
+    f"    S1 ΔCr≥0.3:   {eligible.aki_delta03.sum():,} ({eligible.aki_delta03.mean()*100:.1f}%)"
+)
+print(
+    f"    S2 ≥2.0×:     {eligible.aki_kdigo2.sum():,} ({eligible.aki_kdigo2.mean()*100:.1f}%)"
+)
+print(
+    f"    S3 ≥3.0×:     {eligible.aki_kdigo3.sum():,} ({eligible.aki_kdigo3.mean()*100:.1f}%)"
+)
+print(
+    f"    S4 180d ≥1.5×: {eligible.aki_180d.sum():,} ({eligible.aki_180d.mean()*100:.1f}%)"
+)
 
 save(eligible, "01_ici_cohort.csv")
 
@@ -543,7 +609,9 @@ demo = query(demo_sql, "Demographics")
 
 # Diagnostic: show actual sex concept IDs
 print(f"  gender_concept_id values: {demo.gender_concept_id.value_counts().to_dict()}")
-print(f"  sex_at_birth_concept_id values: {demo.sex_at_birth_concept_id.value_counts().to_dict()}")
+print(
+    f"  sex_at_birth_concept_id values: {demo.sex_at_birth_concept_id.value_counts().to_dict()}"
+)
 
 # If sex is still all "Other", fall back to sex_at_birth_concept_id survey
 if (demo["sex_at_birth"] == "Other").all():
@@ -569,8 +637,17 @@ print(f"  Race: {demo.race.value_counts().to_dict()}")
 print(f"  Age: {demo.age_group.value_counts().to_dict()}")
 
 save(
-    demo[["person_id", "sex_at_birth", "race", "ethnicity",
-          "age_at_ici", "age_group", "year_of_birth"]],
+    demo[
+        [
+            "person_id",
+            "sex_at_birth",
+            "race",
+            "ethnicity",
+            "age_at_ici",
+            "age_group",
+            "year_of_birth",
+        ]
+    ],
     "02_demographics.csv",
 )
 
@@ -597,82 +674,354 @@ NCI_CCI = {
         "10": ["I252"],
     },
     "Congestive_Heart_Failure": {
-        "9": ["39891","40201","40211","40291","40401","40403",
-              "40411","40413","40491","40493",
-              "4254","4255","4256","4257","4258","4259","428"],
-        "10": ["I099","I110","I130","I132","I255",
-               "I420","I425","I426","I427","I428","I429",
-               "I43","I50","P290"],
+        "9": [
+            "39891",
+            "40201",
+            "40211",
+            "40291",
+            "40401",
+            "40403",
+            "40411",
+            "40413",
+            "40491",
+            "40493",
+            "4254",
+            "4255",
+            "4256",
+            "4257",
+            "4258",
+            "4259",
+            "428",
+        ],
+        "10": [
+            "I099",
+            "I110",
+            "I130",
+            "I132",
+            "I255",
+            "I420",
+            "I425",
+            "I426",
+            "I427",
+            "I428",
+            "I429",
+            "I43",
+            "I50",
+            "P290",
+        ],
     },
     "Peripheral_Vascular_Disease": {
-        "9": ["0930","440","441",
-              "4431","4432","4433","4434","4435","4436","4437","4438","4439",
-              "4471","5571","5579","V434"],
-        "10": ["I70","I71","I731","I738","I739","I771",
-               "I790","I792","K551","K558","K559","Z958","Z959"],
+        "9": [
+            "0930",
+            "440",
+            "441",
+            "4431",
+            "4432",
+            "4433",
+            "4434",
+            "4435",
+            "4436",
+            "4437",
+            "4438",
+            "4439",
+            "4471",
+            "5571",
+            "5579",
+            "V434",
+        ],
+        "10": [
+            "I70",
+            "I71",
+            "I731",
+            "I738",
+            "I739",
+            "I771",
+            "I790",
+            "I792",
+            "K551",
+            "K558",
+            "K559",
+            "Z958",
+            "Z959",
+        ],
     },
     "Cerebrovascular_Disease": {
-        "9": ["36234","430","431","432","433","434","435","436","437","438"],
-        "10": ["G45","G46","H340",
-               "I60","I61","I62","I63","I64","I65","I66","I67","I68","I69"],
+        "9": ["36234", "430", "431", "432", "433", "434", "435", "436", "437", "438"],
+        "10": [
+            "G45",
+            "G46",
+            "H340",
+            "I60",
+            "I61",
+            "I62",
+            "I63",
+            "I64",
+            "I65",
+            "I66",
+            "I67",
+            "I68",
+            "I69",
+        ],
     },
     "Chronic_Pulmonary_Disease": {
-        "9": ["4168","4169","490","491","492","493","494","495","496","497",
-              "498","499","500","501","502","503","504","505","5064","5081","5088"],
-        "10": ["I278","I279","J40","J41","J42","J43","J44","J45","J46","J47",
-               "J60","J61","J62","J63","J64","J65","J66","J67","J684","J701","J703"],
+        "9": [
+            "4168",
+            "4169",
+            "490",
+            "491",
+            "492",
+            "493",
+            "494",
+            "495",
+            "496",
+            "497",
+            "498",
+            "499",
+            "500",
+            "501",
+            "502",
+            "503",
+            "504",
+            "505",
+            "5064",
+            "5081",
+            "5088",
+        ],
+        "10": [
+            "I278",
+            "I279",
+            "J40",
+            "J41",
+            "J42",
+            "J43",
+            "J44",
+            "J45",
+            "J46",
+            "J47",
+            "J60",
+            "J61",
+            "J62",
+            "J63",
+            "J64",
+            "J65",
+            "J66",
+            "J67",
+            "J684",
+            "J701",
+            "J703",
+        ],
     },
     "Dementia": {
-        "9": ["290","2941","3312"],
-        "10": ["F00","F01","F02","F03","F051","G30","G311"],
+        "9": ["290", "2941", "3312"],
+        "10": ["F00", "F01", "F02", "F03", "F051", "G30", "G311"],
     },
     "Paralysis": {
-        "9": ["3341","342","343",
-              "3440","3441","3442","3443","3444","3445","3446","3449"],
-        "10": ["G041","G114","G801","G802","G81","G82",
-               "G830","G831","G832","G833","G834","G839"],
+        "9": [
+            "3341",
+            "342",
+            "343",
+            "3440",
+            "3441",
+            "3442",
+            "3443",
+            "3444",
+            "3445",
+            "3446",
+            "3449",
+        ],
+        "10": [
+            "G041",
+            "G114",
+            "G801",
+            "G802",
+            "G81",
+            "G82",
+            "G830",
+            "G831",
+            "G832",
+            "G833",
+            "G834",
+            "G839",
+        ],
     },
     "Diabetes": {
-        "9": ["2500","2501","2502","2503","2508","2509"],
-        "10": ["E100","E101","E106","E108","E109",
-               "E110","E111","E116","E118","E119",
-               "E130","E131","E136","E138","E139"],
+        "9": ["2500", "2501", "2502", "2503", "2508", "2509"],
+        "10": [
+            "E100",
+            "E101",
+            "E106",
+            "E108",
+            "E109",
+            "E110",
+            "E111",
+            "E116",
+            "E118",
+            "E119",
+            "E130",
+            "E131",
+            "E136",
+            "E138",
+            "E139",
+        ],
     },
     "Diabetes_Complicated": {
-        "9": ["2504","2505","2506","2507"],
-        "10": ["E102","E103","E104","E105","E107",
-               "E112","E113","E114","E115","E117",
-               "E132","E133","E134","E135","E137"],
+        "9": ["2504", "2505", "2506", "2507"],
+        "10": [
+            "E102",
+            "E103",
+            "E104",
+            "E105",
+            "E107",
+            "E112",
+            "E113",
+            "E114",
+            "E115",
+            "E117",
+            "E132",
+            "E133",
+            "E134",
+            "E135",
+            "E137",
+        ],
     },
     "Renal_Disease": {
-        "9": ["40301","40311","40391","40402","40403","40412","40413",
-              "40492","40493","582","5830","5831","5832","5833","5834",
-              "5835","5836","5837","585","586","5880","V420","V451","V56"],
-        "10": ["I120","I131","N032","N033","N034","N035","N036","N037",
-               "N052","N053","N054","N055","N056","N057",
-               "N18","N19","N250","Z490","Z491","Z492","Z940","Z992"],
+        "9": [
+            "40301",
+            "40311",
+            "40391",
+            "40402",
+            "40403",
+            "40412",
+            "40413",
+            "40492",
+            "40493",
+            "582",
+            "5830",
+            "5831",
+            "5832",
+            "5833",
+            "5834",
+            "5835",
+            "5836",
+            "5837",
+            "585",
+            "586",
+            "5880",
+            "V420",
+            "V451",
+            "V56",
+        ],
+        "10": [
+            "I120",
+            "I131",
+            "N032",
+            "N033",
+            "N034",
+            "N035",
+            "N036",
+            "N037",
+            "N052",
+            "N053",
+            "N054",
+            "N055",
+            "N056",
+            "N057",
+            "N18",
+            "N19",
+            "N250",
+            "Z490",
+            "Z491",
+            "Z492",
+            "Z940",
+            "Z992",
+        ],
     },
     "Liver_Disease_Mild": {
-        "9": ["07022","07023","07032","07033","07044","07054",
-              "0706","0709","570","571","5733","5734","5738","5739","V427"],
-        "10": ["B18","K700","K701","K702","K703","K709",
-               "K713","K714","K715","K717","K73","K74",
-               "K760","K762","K763","K764","K768","K769","Z944"],
+        "9": [
+            "07022",
+            "07023",
+            "07032",
+            "07033",
+            "07044",
+            "07054",
+            "0706",
+            "0709",
+            "570",
+            "571",
+            "5733",
+            "5734",
+            "5738",
+            "5739",
+            "V427",
+        ],
+        "10": [
+            "B18",
+            "K700",
+            "K701",
+            "K702",
+            "K703",
+            "K709",
+            "K713",
+            "K714",
+            "K715",
+            "K717",
+            "K73",
+            "K74",
+            "K760",
+            "K762",
+            "K763",
+            "K764",
+            "K768",
+            "K769",
+            "Z944",
+        ],
     },
     "Liver_Disease_Moderate_Severe": {
-        "9": ["4560","4561","4562","5722","5723","5724","5725","5726","5727","5728"],
-        "10": ["I850","I859","I864","I982",
-               "K704","K711","K721","K729","K765","K766","K767"],
+        "9": [
+            "4560",
+            "4561",
+            "4562",
+            "5722",
+            "5723",
+            "5724",
+            "5725",
+            "5726",
+            "5727",
+            "5728",
+        ],
+        "10": [
+            "I850",
+            "I859",
+            "I864",
+            "I982",
+            "K704",
+            "K711",
+            "K721",
+            "K729",
+            "K765",
+            "K766",
+            "K767",
+        ],
     },
     "Peptic_Ulcer_Disease": {
-        "9": ["531","532","533","534"],
-        "10": ["K25","K26","K27","K28"],
+        "9": ["531", "532", "533", "534"],
+        "10": ["K25", "K26", "K27", "K28"],
     },
     "Rheumatic_Disease": {
-        "9": ["4465","7100","7101","7102","7103","7104",
-              "7140","7141","7142","7148","725"],
-        "10": ["M05","M06","M315","M32","M33","M34",
-               "M351","M353","M360"],
+        "9": [
+            "4465",
+            "7100",
+            "7101",
+            "7102",
+            "7103",
+            "7104",
+            "7140",
+            "7141",
+            "7142",
+            "7148",
+            "725",
+        ],
+        "10": ["M05", "M06", "M315", "M32", "M33", "M34", "M351", "M353", "M360"],
     },
     "AIDS": {
         "9": ["042"],
@@ -698,14 +1047,86 @@ for condition, codes in NCI_CCI.items():
 
 # AIDS OI codes for two-step AIDS logic
 AIDS_OI = {
-    "9": ["112","180","114","1175","0074","0785","3483","054","115","0072",
-          "176","200","201","202","203","204","205","206","207","208","209",
-          "031","010","011","012","013","014","015","016","017","018",
-          "1363","V1261","0463","0031","130","7994"],
-    "10": ["B37","C53","B38","B45","A072","B25","G934","B00","B39","A073",
-           "C46","C81","C82","C83","C84","C85","C86","C87","C88","C9",
-           "C90","C91","C92","C93","C94","C95","C96","A31","A15","A16",
-           "A17","A18","A19","B59","Z8701","A812","A021","B58","R64"],
+    "9": [
+        "112",
+        "180",
+        "114",
+        "1175",
+        "0074",
+        "0785",
+        "3483",
+        "054",
+        "115",
+        "0072",
+        "176",
+        "200",
+        "201",
+        "202",
+        "203",
+        "204",
+        "205",
+        "206",
+        "207",
+        "208",
+        "209",
+        "031",
+        "010",
+        "011",
+        "012",
+        "013",
+        "014",
+        "015",
+        "016",
+        "017",
+        "018",
+        "1363",
+        "V1261",
+        "0463",
+        "0031",
+        "130",
+        "7994",
+    ],
+    "10": [
+        "B37",
+        "C53",
+        "B38",
+        "B45",
+        "A072",
+        "B25",
+        "G934",
+        "B00",
+        "B39",
+        "A073",
+        "C46",
+        "C81",
+        "C82",
+        "C83",
+        "C84",
+        "C85",
+        "C86",
+        "C87",
+        "C88",
+        "C9",
+        "C90",
+        "C91",
+        "C92",
+        "C93",
+        "C94",
+        "C95",
+        "C96",
+        "A31",
+        "A15",
+        "A16",
+        "A17",
+        "A18",
+        "A19",
+        "B59",
+        "Z8701",
+        "A812",
+        "A021",
+        "B58",
+        "R64",
+    ],
 }
 oi_clauses = []
 for ver, voc in [("9", "ICD9CM"), ("10", "ICD10CM")]:
@@ -747,7 +1168,9 @@ charlson.loc[charlson["Diabetes_Complicated"] == 1, "Diabetes"] = 0
 
 # Verify: NO Malignancy or Metastatic columns (NCI design)
 assert "Malignancy" not in charlson.columns, "NCI-CCI must NOT include Malignancy"
-assert "Metastatic_Solid_Tumor" not in charlson.columns, "NCI-CCI must NOT include Metastatic"
+assert (
+    "Metastatic_Solid_Tumor" not in charlson.columns
+), "NCI-CCI must NOT include Metastatic"
 
 # Print prevalences
 print("\n  NCI-CCI prevalences:")
@@ -771,9 +1194,15 @@ PIDS_SDOH = ",".join(map(str, eligible.person_id.tolist()))
 
 # Insurance (concept 43528428) ─────────────────────────────────────
 ins_map = {
-    43529209: "Medicaid", 43529210: "Medicare", 43529120: "Employer",
-    43529119: "Private", 43529920: "Military", 43529926: "VA",
-    43528423: "Other_Public", 43529111: "Indian", 43529095: "Uninsured",
+    43529209: "Medicaid",
+    43529210: "Medicare",
+    43529120: "Employer",
+    43529119: "Private",
+    43529920: "Military",
+    43529926: "VA",
+    43528423: "Other_Public",
+    43529111: "Indian",
+    43529095: "Uninsured",
 }
 insurance_sql = f"""
 SELECT person_id, value_source_concept_id AS ins_code
@@ -783,19 +1212,40 @@ WHERE observation_source_concept_id = 43528428
   AND person_id IN ({PIDS_SDOH})
 """
 insurance_raw = query(insurance_sql, "Insurance")
-insurance_raw["ins_type"] = insurance_raw["ins_code"].map(ins_map).fillna("Other_Public")
-ins_priority = {"Medicaid":0,"Medicare":1,"Employer":2,"Private":3,
-                "VA":4,"Military":5,"Other_Public":6,"Indian":7,"Uninsured":8}
+insurance_raw["ins_type"] = (
+    insurance_raw["ins_code"].map(ins_map).fillna("Other_Public")
+)
+ins_priority = {
+    "Medicaid": 0,
+    "Medicare": 1,
+    "Employer": 2,
+    "Private": 3,
+    "VA": 4,
+    "Military": 5,
+    "Other_Public": 6,
+    "Indian": 7,
+    "Uninsured": 8,
+}
 insurance_raw["priority"] = insurance_raw["ins_type"].map(ins_priority).fillna(9)
-insurance = insurance_raw.sort_values("priority").groupby("person_id").first().reset_index()
-insurance = insurance[["person_id", "ins_type"]].rename(columns={"ins_type": "insurance_type"})
+insurance = (
+    insurance_raw.sort_values("priority").groupby("person_id").first().reset_index()
+)
+insurance = insurance[["person_id", "ins_type"]].rename(
+    columns={"ins_type": "insurance_type"}
+)
 print(f"  Insurance: {insurance.insurance_type.value_counts().to_dict()}")
 
 # Income (concept 1585375) ─────────────────────────────────────────
 inc_map = {
-    1585376: "Less_10K", 1585377: "10K_25K", 1585378: "25K_35K",
-    1585379: "35K_50K", 1585380: "50K_75K", 1585381: "75K_100K",
-    1585382: "100K_150K", 1585383: "150K_200K", 1585384: "200K_Plus",
+    1585376: "Less_10K",
+    1585377: "10K_25K",
+    1585378: "25K_35K",
+    1585379: "35K_50K",
+    1585380: "50K_75K",
+    1585381: "75K_100K",
+    1585382: "100K_150K",
+    1585383: "150K_200K",
+    1585384: "200K_Plus",
 }
 income_sql = f"""
 SELECT person_id, value_source_concept_id AS code
@@ -806,14 +1256,21 @@ WHERE observation_source_concept_id = 1585375
 """
 income = query(income_sql, "Income")
 income["income"] = income["code"].map(inc_map).fillna("Missing")
-income = income[["person_id", "income"]].drop_duplicates(subset="person_id", keep="first")
+income = income[["person_id", "income"]].drop_duplicates(
+    subset="person_id", keep="first"
+)
 print(f"  Income: {income.income.value_counts().to_dict()}")
 
 # Education (concept 1585940) ──────────────────────────────────────
 edu_map = {
-    1585941: "Never_Attended", 1585942: "Less_HS", 1585943: "Less_HS",
-    1585944: "Less_HS", 1585945: "HS_GED", 1585946: "Some_College",
-    1585947: "College_Grad", 1585948: "Advanced_Degree",
+    1585941: "Never_Attended",
+    1585942: "Less_HS",
+    1585943: "Less_HS",
+    1585944: "Less_HS",
+    1585945: "HS_GED",
+    1585946: "Some_College",
+    1585947: "College_Grad",
+    1585948: "Advanced_Degree",
 }
 edu_sql = f"""
 SELECT person_id, value_source_concept_id AS code
@@ -829,9 +1286,14 @@ print(f"  Education: {edu.education.value_counts().to_dict()}")
 
 # Employment (concept 1585952) ─────────────────────────────────────
 emp_map = {
-    1585953: "Employed", 1585954: "Employed", 1585955: "Unemployed",
-    1585956: "Unemployed", 1585957: "Not_In_Labor", 1585958: "Student",
-    1585959: "Retired", 1585960: "Disabled",
+    1585953: "Employed",
+    1585954: "Employed",
+    1585955: "Unemployed",
+    1585956: "Unemployed",
+    1585957: "Not_In_Labor",
+    1585958: "Student",
+    1585959: "Retired",
+    1585960: "Disabled",
 }
 emp_sql = f"""
 SELECT person_id, value_source_concept_id AS code
@@ -856,7 +1318,9 @@ WHERE observation_source_concept_id = 1585370
 """
 housing = query(hou_sql, "Housing")
 housing["housing"] = housing["code"].map(hou_map).fillna("Missing")
-housing = housing[["person_id", "housing"]].drop_duplicates(subset="person_id", keep="first")
+housing = housing[["person_id", "housing"]].drop_duplicates(
+    subset="person_id", keep="first"
+)
 print(f"  Housing: {housing.housing.value_counts().to_dict()}")
 
 # Housing Stability (concept 1585886) ──────────────────────────────
@@ -870,7 +1334,9 @@ WHERE observation_source_concept_id = 1585886
 """
 stability = query(stab_sql, "Housing stability")
 stability["housing_stability"] = stability["code"].map(stab_map).fillna("Missing")
-stability = stability[["person_id", "housing_stability"]].drop_duplicates(subset="person_id", keep="first")
+stability = stability[["person_id", "housing_stability"]].drop_duplicates(
+    subset="person_id", keep="first"
+)
 print(f"  Stability: {stability.housing_stability.value_counts().to_dict()}")
 
 # ── Merge all SDoH ────────────────────────────────────────────────
@@ -886,12 +1352,18 @@ sdoh["disability"] = (sdoh["employment"] == "Disabled").astype(int)
 sdoh = sdoh.fillna("Missing")
 
 print(f"\n  SDoH summary:")
-for col in ["insurance_type", "income", "education", "employment",
-            "housing", "housing_stability", "disability"]:
+for col in [
+    "insurance_type",
+    "income",
+    "education",
+    "employment",
+    "housing",
+    "housing_stability",
+    "disability",
+]:
     print(f"    {col}: {sdoh[col].value_counts().to_dict()}")
 
 save(sdoh, "04_sdoh.csv")
-
 
 
 # =====================================================================
@@ -922,22 +1394,69 @@ cancer_dx = query(cancer_type_sql, "Cancer type")
 cancer_dx["condition_start_date"] = pd.to_datetime(cancer_dx["condition_start_date"])
 cancer_dx = cancer_dx.merge(eligible[["person_id", "ici_index_date"]], on="person_id")
 
+
 def classify_cancer(dx_code):
     code = dx_code.upper()
-    if code.startswith("C34"): return "Lung"
-    if code.startswith("C43"): return "Melanoma"
-    if code.startswith("C64") or code.startswith("C65"): return "Renal_Cell"
-    if code.startswith("C67"): return "Urothelial"
-    if any(code.startswith(p) for p in ["C00","C01","C02","C03","C04","C05","C06",
-            "C07","C08","C09","C10","C11","C12","C13","C14","C30","C31","C32"]):
+    if code.startswith("C34"):
+        return "Lung"
+    if code.startswith("C43"):
+        return "Melanoma"
+    if code.startswith("C64") or code.startswith("C65"):
+        return "Renal_Cell"
+    if code.startswith("C67"):
+        return "Urothelial"
+    if any(
+        code.startswith(p)
+        for p in [
+            "C00",
+            "C01",
+            "C02",
+            "C03",
+            "C04",
+            "C05",
+            "C06",
+            "C07",
+            "C08",
+            "C09",
+            "C10",
+            "C11",
+            "C12",
+            "C13",
+            "C14",
+            "C30",
+            "C31",
+            "C32",
+        ]
+    ):
         return "Head_Neck"
-    if code.startswith("C50"): return "Breast"
-    if code.startswith("C22"): return "Hepatocellular"
-    if any(code.startswith(p) for p in ["C18","C19","C20"]): return "Colorectal"
-    if any(code.startswith(p) for p in ["C81","C82","C83","C84","C85","C86",
-            "C88","C90","C91","C92","C93","C94","C95","C96"]):
+    if code.startswith("C50"):
+        return "Breast"
+    if code.startswith("C22"):
+        return "Hepatocellular"
+    if any(code.startswith(p) for p in ["C18", "C19", "C20"]):
+        return "Colorectal"
+    if any(
+        code.startswith(p)
+        for p in [
+            "C81",
+            "C82",
+            "C83",
+            "C84",
+            "C85",
+            "C86",
+            "C88",
+            "C90",
+            "C91",
+            "C92",
+            "C93",
+            "C94",
+            "C95",
+            "C96",
+        ]
+    ):
         return "Hematologic"
     return "Other_Solid"
+
 
 cancer_dx["cancer_type"] = cancer_dx["dx_code"].apply(classify_cancer)
 
@@ -948,7 +1467,9 @@ cancer_dx["days_to_ici"] = abs(
 cancer_primary = cancer_dx.sort_values("days_to_ici").groupby("person_id").first()
 cancer_primary = cancer_primary[["cancer_type"]].reset_index()
 
-eligible_cancer = eligible[["person_id"]].merge(cancer_primary, on="person_id", how="left")
+eligible_cancer = eligible[["person_id"]].merge(
+    cancer_primary, on="person_id", how="left"
+)
 eligible_cancer["cancer_type"] = eligible_cancer["cancer_type"].fillna("Unknown")
 print(f"  Cancer types: {eligible_cancer.cancer_type.value_counts().to_dict()}")
 
@@ -960,8 +1481,10 @@ PPI_CONCEPTS = "911735,929887,904453,948078,2038233,997276"
 # NSAID concept IDs (ibuprofen, naproxen, diclofenac, celecoxib, etc.)
 NSAID_CONCEPTS = "1177480,1115171,1124300,1118084,1236607,1150345,1146810"
 # ACEi/ARB concept IDs
-ACEI_ARB_CONCEPTS = ("1335471,1340128,1341927,1363749,1308216,1310756,"
-                     "1331235,1334456,1373928,1395058,40235485,1347384")
+ACEI_ARB_CONCEPTS = (
+    "1335471,1340128,1341927,1363749,1308216,1310756,"
+    "1331235,1334456,1373928,1395058,40235485,1347384"
+)
 # Diuretic concept IDs (furosemide, HCTZ, bumetanide, etc.)
 DIURETIC_CONCEPTS = "956874,974166,932745,942350,904542,970250"
 
@@ -1003,10 +1526,18 @@ nephrotoxins = eligible[["person_id"]].merge(nephrotoxins, on="person_id", how="
 for col in ["ppi_flag", "nsaid_flag", "acei_arb_flag", "diuretic_flag"]:
     nephrotoxins[col] = nephrotoxins[col].fillna(0).astype(int)
 
-print(f"  PPI:  {nephrotoxins.ppi_flag.sum():,} ({nephrotoxins.ppi_flag.mean()*100:.1f}%)")
-print(f"  NSAID: {nephrotoxins.nsaid_flag.sum():,} ({nephrotoxins.nsaid_flag.mean()*100:.1f}%)")
-print(f"  ACEi/ARB: {nephrotoxins.acei_arb_flag.sum():,} ({nephrotoxins.acei_arb_flag.mean()*100:.1f}%)")
-print(f"  Diuretic: {nephrotoxins.diuretic_flag.sum():,} ({nephrotoxins.diuretic_flag.mean()*100:.1f}%)")
+print(
+    f"  PPI:  {nephrotoxins.ppi_flag.sum():,} ({nephrotoxins.ppi_flag.mean()*100:.1f}%)"
+)
+print(
+    f"  NSAID: {nephrotoxins.nsaid_flag.sum():,} ({nephrotoxins.nsaid_flag.mean()*100:.1f}%)"
+)
+print(
+    f"  ACEi/ARB: {nephrotoxins.acei_arb_flag.sum():,} ({nephrotoxins.acei_arb_flag.mean()*100:.1f}%)"
+)
+print(
+    f"  Diuretic: {nephrotoxins.diuretic_flag.sum():,} ({nephrotoxins.diuretic_flag.mean()*100:.1f}%)"
+)
 
 # Merge cancer type + nephrotoxins
 covariates = eligible_cancer.merge(nephrotoxins, on="person_id")
@@ -1059,13 +1590,70 @@ print("\n" + "=" * 70)
 print("STEP 7: Build Regression Base")
 print("=" * 70)
 
-reg = eligible[["person_id", "severity", "ici_index_date", "ici_regimen",
-                "baseline_cr", "max_cr_ratio",
-                "aki_delta03", "aki_kdigo2", "aki_kdigo3", "aki_180d"]].copy()
-reg = reg.merge(demo[["person_id","sex_at_birth","race","ethnicity","age_group"]], on="person_id")
+reg = eligible[
+    [
+        "person_id",
+        "severity",
+        "ici_index_date",
+        "ici_regimen",
+        "baseline_cr",
+        "max_cr_ratio",
+        "aki_delta03",
+        "aki_kdigo2",
+        "aki_kdigo3",
+        "aki_180d",
+    ]
+].copy()
+reg = reg.merge(
+    demo[["person_id", "sex_at_birth", "race", "ethnicity", "age_group"]],
+    on="person_id",
+)
 reg = reg.merge(charlson, on="person_id")
 reg = reg.merge(covariates, on="person_id")
-reg = reg.merge(match_vars[["person_id","enrollment_days","n_diagnoses","ehr_length_days"]], on="person_id")
+reg = reg.merge(sdoh, on="person_id")
+reg = reg.merge(
+    match_vars[["person_id", "enrollment_days", "n_diagnoses", "ehr_length_days"]],
+    on="person_id",
+)
+
+# ── Derived columns for simplified models ─────────────────────────
+# NCI-CCI score (sum of Charlson integer weights)
+NCI_WEIGHTS = {
+    "Acute_MI": 1,
+    "History_MI": 1,
+    "Congestive_Heart_Failure": 1,
+    "Peripheral_Vascular_Disease": 1,
+    "Cerebrovascular_Disease": 1,
+    "Chronic_Pulmonary_Disease": 1,
+    "Dementia": 1,
+    "Paralysis": 2,
+    "Diabetes": 1,
+    "Diabetes_Complicated": 2,
+    "Renal_Disease": 2,
+    "Liver_Disease_Mild": 1,
+    "Liver_Disease_Moderate_Severe": 3,
+    "Peptic_Ulcer_Disease": 1,
+    "Rheumatic_Disease": 1,
+    "AIDS": 6,
+}
+reg["nci_cci_score"] = sum(
+    reg[col].astype(int) * wt for col, wt in NCI_WEIGHTS.items() if col in reg.columns
+)
+print(
+    f"  NCI-CCI score: median {reg.nci_cci_score.median():.0f}, "
+    f"IQR {reg.nci_cci_score.quantile(0.25):.0f}–{reg.nci_cci_score.quantile(0.75):.0f}, "
+    f"max {reg.nci_cci_score.max():.0f}"
+)
+
+# Collapsed cancer type (3 groups: Lung, Melanoma, Other)
+reg["cancer_type_collapsed"] = reg["cancer_type"].apply(
+    lambda x: x if x in ["Lung", "Melanoma"] else "Other"
+)
+
+# Collapsed ICI regimen (2 groups: anti_pd1, other)
+reg["ici_collapsed"] = reg["ici_regimen"].apply(
+    lambda x: "anti_pd1" if x == "anti_pd1" else "other_combo"
+)
 
 print(f"  Regression base: {len(reg):,} rows, {reg.shape[1]} cols")
 print(f"  Cases: {reg.severity.sum():,}  Controls: {(reg.severity==0).sum():,}")
