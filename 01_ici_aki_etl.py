@@ -761,173 +761,137 @@ save(charlson, "03_nci_charlson.csv")
 
 # =====================================================================
 # STEP 4: SDoH (Basics Survey)
-# Identical to COVID pipeline — same survey items, same recoding.
+# Rewritten for CDR C2024Q3R9 value_source_concept_ids.
 # =====================================================================
 print("\n" + "=" * 70)
 print("STEP 4: SDoH (Basics Survey)")
 print("=" * 70)
 
-# Insurance ────────────────────────────────────────────────────────
+PIDS_SDOH = ",".join(map(str, eligible.person_id.tolist()))
+
+# Insurance (concept 43528428) ─────────────────────────────────────
+ins_map = {
+    43529209: "Medicaid", 43529210: "Medicare", 43529120: "Employer",
+    43529119: "Private", 43529920: "Military", 43529926: "VA",
+    43528423: "Other_Public", 43529111: "Indian", 43529095: "Uninsured",
+}
 insurance_sql = f"""
-SELECT person_id,
-  MAX(CASE WHEN value_source_concept_id = 45877740 THEN 1 ELSE 0 END) AS ins_employer,
-  MAX(CASE WHEN value_source_concept_id = 45882567 THEN 1 ELSE 0 END) AS ins_private,
-  MAX(CASE WHEN value_source_concept_id = 45877746 THEN 1 ELSE 0 END) AS ins_medicare,
-  MAX(CASE WHEN value_source_concept_id = 45882571 THEN 1 ELSE 0 END) AS ins_medicaid,
-  MAX(CASE WHEN value_source_concept_id = 45878463 THEN 1 ELSE 0 END) AS ins_military,
-  MAX(CASE WHEN value_source_concept_id = 45876662 THEN 1 ELSE 0 END) AS ins_indian,
-  MAX(CASE WHEN value_source_concept_id = 45882572 THEN 1 ELSE 0 END) AS ins_none,
-  MAX(CASE WHEN value_source_concept_id = 45883427 THEN 1 ELSE 0 END) AS ins_other
+SELECT person_id, value_source_concept_id AS ins_code
 FROM `{CDR}`.observation
 WHERE observation_source_concept_id = 43528428
-  AND person_id IN ({','.join(map(str, eligible.person_id.tolist()))})
-GROUP BY person_id
+  AND value_source_concept_id NOT IN (903096, 46237613)
+  AND person_id IN ({PIDS_SDOH})
 """
-insurance = query(insurance_sql, "Insurance")
+insurance_raw = query(insurance_sql, "Insurance")
+insurance_raw["ins_type"] = insurance_raw["ins_code"].map(ins_map).fillna("Other_Public")
+ins_priority = {"Medicaid":0,"Medicare":1,"Employer":2,"Private":3,
+                "VA":4,"Military":5,"Other_Public":6,"Indian":7,"Uninsured":8}
+insurance_raw["priority"] = insurance_raw["ins_type"].map(ins_priority).fillna(9)
+insurance = insurance_raw.sort_values("priority").groupby("person_id").first().reset_index()
+insurance = insurance[["person_id", "ins_type"]].rename(columns={"ins_type": "insurance_type"})
+print(f"  Insurance: {insurance.insurance_type.value_counts().to_dict()}")
 
-# Hierarchical recode: Medicaid > Medicare > Employer > Private > Other_None
-def recode_insurance(row):
-    if row.get("ins_medicaid", 0) == 1:
-        return "Medicaid"
-    if row.get("ins_medicare", 0) == 1:
-        return "Medicare"
-    if row.get("ins_employer", 0) == 1:
-        return "Employer"
-    if row.get("ins_private", 0) == 1:
-        return "Private"
-    if row.get("ins_military", 0) == 1 or row.get("ins_indian", 0) == 1:
-        return "Other_Public"
-    if row.get("ins_none", 0) == 1:
-        return "Uninsured"
-    return "Missing"
-
-insurance["insurance_type"] = insurance.apply(recode_insurance, axis=1)
-
-# Income ───────────────────────────────────────────────────────────
-income_map = {
-    45880480: "Less_10K",
-    45876648: "10K_25K",
-    45880660: "25K_35K",
-    45880116: "35K_50K",
-    45877579: "50K_75K",
-    45881804: "75K_100K",
-    45876981: "100K_150K",
-    45883383: "150K_200K",
-    45874835: "200K_Plus",
+# Income (concept 1585375) ─────────────────────────────────────────
+inc_map = {
+    1585376: "Less_10K", 1585377: "10K_25K", 1585378: "25K_35K",
+    1585379: "35K_50K", 1585380: "50K_75K", 1585381: "75K_100K",
+    1585382: "100K_150K", 1585383: "150K_200K", 1585384: "200K_Plus",
 }
 income_sql = f"""
-SELECT person_id,
-  value_source_concept_id AS income_code
+SELECT person_id, value_source_concept_id AS code
 FROM `{CDR}`.observation
 WHERE observation_source_concept_id = 1585375
-  AND person_id IN ({','.join(map(str, eligible.person_id.tolist()))})
+  AND value_source_concept_id NOT IN (903096, 903079)
+  AND person_id IN ({PIDS_SDOH})
 """
 income = query(income_sql, "Income")
-income["income"] = income["income_code"].map(income_map).fillna("Missing")
+income["income"] = income["code"].map(inc_map).fillna("Missing")
+income = income[["person_id", "income"]].drop_duplicates(subset="person_id", keep="first")
+print(f"  Income: {income.income.value_counts().to_dict()}")
 
-# Education ────────────────────────────────────────────────────────
+# Education (concept 1585940) ──────────────────────────────────────
 edu_map = {
-    903079: "Never_Attended",
-    903096: "Less_HS",
-    903087: "HS_GED",
-    903095: "Some_College",
-    903071: "College_Grad",
-    903085: "Advanced_Degree",
+    1585941: "Never_Attended", 1585942: "Less_HS", 1585943: "Less_HS",
+    1585944: "Less_HS", 1585945: "HS_GED", 1585946: "Some_College",
+    1585947: "College_Grad", 1585948: "Advanced_Degree",
 }
 edu_sql = f"""
-SELECT person_id,
-  value_source_concept_id AS edu_code
+SELECT person_id, value_source_concept_id AS code
 FROM `{CDR}`.observation
 WHERE observation_source_concept_id = 1585940
-  AND person_id IN ({','.join(map(str, eligible.person_id.tolist()))})
+  AND value_source_concept_id NOT IN (903096, 903079)
+  AND person_id IN ({PIDS_SDOH})
 """
 edu = query(edu_sql, "Education")
-edu["education"] = edu["edu_code"].map(edu_map).fillna("Missing")
+edu["education"] = edu["code"].map(edu_map).fillna("Missing")
+edu = edu[["person_id", "education"]].drop_duplicates(subset="person_id", keep="first")
+print(f"  Education: {edu.education.value_counts().to_dict()}")
 
-# Employment ───────────────────────────────────────────────────────
+# Employment (concept 1585952) ─────────────────────────────────────
 emp_map = {
-    903026: "Employed",
-    903025: "Unemployed_Looking",
-    903027: "Not_Working_Not_Looking",
-    903018: "Disabled",
-    903023: "Retired",
-    903036: "Student",
+    1585953: "Employed", 1585954: "Employed", 1585955: "Unemployed",
+    1585956: "Unemployed", 1585957: "Not_In_Labor", 1585958: "Student",
+    1585959: "Retired", 1585960: "Disabled",
 }
 emp_sql = f"""
-SELECT person_id,
-  value_source_concept_id AS emp_code
+SELECT person_id, value_source_concept_id AS code
 FROM `{CDR}`.observation
 WHERE observation_source_concept_id = 1585952
-  AND person_id IN ({','.join(map(str, eligible.person_id.tolist()))})
+  AND value_source_concept_id NOT IN (903096, 903079)
+  AND person_id IN ({PIDS_SDOH})
 """
 emp = query(emp_sql, "Employment")
-emp["employment"] = emp["emp_code"].map(emp_map).fillna("Missing")
+emp["employment"] = emp["code"].map(emp_map).fillna("Missing")
+emp = emp[["person_id", "employment"]].drop_duplicates(subset="person_id", keep="first")
+print(f"  Employment: {emp.employment.value_counts().to_dict()}")
 
-# Housing ──────────────────────────────────────────────────────────
-housing_map = {
-    903069: "Own",
-    903064: "Rent",
-    903058: "Other",
-}
-housing_sql = f"""
-SELECT person_id,
-  value_source_concept_id AS housing_code
+# Housing — Home Ownership (concept 1585370) ───────────────────────
+hou_map = {1585371: "Own", 1585372: "Rent", 1585373: "Other"}
+hou_sql = f"""
+SELECT person_id, value_source_concept_id AS code
 FROM `{CDR}`.observation
-WHERE observation_source_concept_id = 1585889
-  AND person_id IN ({','.join(map(str, eligible.person_id.tolist()))})
+WHERE observation_source_concept_id = 1585370
+  AND value_source_concept_id NOT IN (903096, 903079, 903087)
+  AND person_id IN ({PIDS_SDOH})
 """
-housing = query(housing_sql, "Housing")
-housing["housing"] = housing["housing_code"].map(housing_map).fillna("Missing")
+housing = query(hou_sql, "Housing")
+housing["housing"] = housing["code"].map(hou_map).fillna("Missing")
+housing = housing[["person_id", "housing"]].drop_duplicates(subset="person_id", keep="first")
+print(f"  Housing: {housing.housing.value_counts().to_dict()}")
 
-# Housing stability ────────────────────────────────────────────────
-stability_map = {
-    903049: "Worried",
-    903047: "Not_Worried",
-}
-stability_sql = f"""
-SELECT person_id,
-  value_source_concept_id AS stability_code
+# Housing Stability (concept 1585886) ──────────────────────────────
+stab_map = {1585887: "Worried", 1585888: "Not_Worried"}
+stab_sql = f"""
+SELECT person_id, value_source_concept_id AS code
 FROM `{CDR}`.observation
 WHERE observation_source_concept_id = 1585886
-  AND person_id IN ({','.join(map(str, eligible.person_id.tolist()))})
+  AND value_source_concept_id NOT IN (903096)
+  AND person_id IN ({PIDS_SDOH})
 """
-stability = query(stability_sql, "Housing stability")
-stability["housing_stability"] = stability["stability_code"].map(stability_map).fillna("Missing")
+stability = query(stab_sql, "Housing stability")
+stability["housing_stability"] = stability["code"].map(stab_map).fillna("Missing")
+stability = stability[["person_id", "housing_stability"]].drop_duplicates(subset="person_id", keep="first")
+print(f"  Stability: {stability.housing_stability.value_counts().to_dict()}")
 
-# Disability (mobility) ────────────────────────────────────────────
-disability_sql = f"""
-SELECT person_id,
-  MAX(CASE WHEN value_source_concept_id IN (903100,903114) THEN 1 ELSE 0 END) AS disability_mobility
-FROM `{CDR}`.observation
-WHERE observation_source_concept_id = 1585747
-  AND person_id IN ({','.join(map(str, eligible.person_id.tolist()))})
-GROUP BY person_id
-"""
-disability = query(disability_sql, "Disability")
-
-# Merge all SDoH
+# ── Merge all SDoH ────────────────────────────────────────────────
 sdoh = eligible[["person_id"]].copy()
-sdoh = sdoh.merge(insurance[["person_id", "insurance_type"]], on="person_id", how="left")
-sdoh = sdoh.merge(income[["person_id", "income"]], on="person_id", how="left")
-sdoh = sdoh.merge(edu[["person_id", "education"]], on="person_id", how="left")
-sdoh = sdoh.merge(emp[["person_id", "employment"]], on="person_id", how="left")
-sdoh = sdoh.merge(housing[["person_id", "housing"]], on="person_id", how="left")
-sdoh = sdoh.merge(stability[["person_id", "housing_stability"]], on="person_id", how="left")
-sdoh = sdoh.merge(disability[["person_id", "disability_mobility"]], on="person_id", how="left")
-# Convert any integer columns to string before fillna
-for col in sdoh.columns:
-    if col == "person_id":
-        continue
-    if sdoh[col].dtype in ["Int64", "int64", "Int32", "int32", "float64", "Float64"]:
-        sdoh[col] = sdoh[col].astype("object")
+sdoh = sdoh.merge(insurance, on="person_id", how="left")
+sdoh = sdoh.merge(income, on="person_id", how="left")
+sdoh = sdoh.merge(edu, on="person_id", how="left")
+sdoh = sdoh.merge(emp, on="person_id", how="left")
+sdoh = sdoh.merge(housing, on="person_id", how="left")
+sdoh = sdoh.merge(stability, on="person_id", how="left")
+# Disability = "Unable to Work" from employment
+sdoh["disability"] = (sdoh["employment"] == "Disabled").astype(int)
 sdoh = sdoh.fillna("Missing")
 
 print(f"\n  SDoH summary:")
 for col in ["insurance_type", "income", "education", "employment",
-            "housing", "housing_stability", "disability_mobility"]:
+            "housing", "housing_stability", "disability"]:
     print(f"    {col}: {sdoh[col].value_counts().to_dict()}")
 
 save(sdoh, "04_sdoh.csv")
+
 
 
 # =====================================================================

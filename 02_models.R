@@ -234,9 +234,9 @@ if (has_sdoh) {
   all_coefs <- bind_rows(all_coefs, stab_coefs)
 
   # ── Disability (mobility) ──────────────────────────────────────
-  if ("disability_mobility" %in% names(regression_bm)) {
-    dis_formula <- update(base_formula, . ~ . + disability_mobility)
-    dis_coefs <- fit_and_save(dis_formula, "disability_mobility")
+  if ("disability" %in% names(regression_bm)) {
+    dis_formula <- update(base_formula, . ~ . + disability)
+    dis_coefs <- fit_and_save(dis_formula, "disability")
     all_coefs <- bind_rows(all_coefs, dis_coefs)
   }
 
@@ -246,8 +246,8 @@ if (has_sdoh) {
   # ════════════════════════════════════════════════════════════════
   joint_terms <- c("f.insurance", "f.income", "f.education",
                    "f.employment", "f.housing", "f.stability")
-  if ("disability_mobility" %in% names(regression_bm)) {
-    joint_terms <- c(joint_terms, "disability_mobility")
+  if ("disability" %in% names(regression_bm)) {
+    joint_terms <- c(joint_terms, "disability")
   }
   joint_rhs <- paste(c(base_terms, joint_terms, "strata(stratum)"),
                      collapse = " + ")
@@ -286,7 +286,7 @@ if (has_sdoh) {
       att_rows <- list()
       for (model_name in c("base", "insurance", "income", "education",
                             "employment", "housing", "housing_stability",
-                            "disability_mobility", "joint_sdoh")) {
+                            "disability", "joint_sdoh")) {
         row <- all_coefs %>%
           filter(model == model_name, variable == "f.raceBlack")
         if (nrow(row) == 1) {
