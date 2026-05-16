@@ -312,11 +312,12 @@ def convert_cr(row):
     unit_id = row.get("unit_concept_id", None)
     unit_src = str(row.get("unit_source_value", "")).lower().strip()
 
-    # Method 1: explicit unit concept ID
-    if unit_id == 8749:  # µmol/L
-        return val * UMOL_TO_MGDL
-    if unit_id == 8840:  # mg/dL
-        return val
+    # Method 1: explicit unit concept ID (guard against NA)
+    if pd.notna(unit_id):
+        if int(unit_id) == 8749:  # µmol/L
+            return val * UMOL_TO_MGDL
+        if int(unit_id) == 8840:  # mg/dL
+            return val
 
     # Method 2: unit_source_value string matching
     if "umol" in unit_src or "µmol" in unit_src or "micromol" in unit_src:
