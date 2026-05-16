@@ -3,11 +3,12 @@
 # Post-ICI AKI × SDoH — Sensitivity Analyses
 # Adapted from aou_covid/03_sensitivity.R
 #
-# S1: AKI defined as Cr ≥1.5× baseline (KDIGO Stage 1+)
-# S2: AKI defined as Cr ≥3.0× baseline (KDIGO Stage 3)
-# S3: 180-day observation window (instead of 365)
-# S4: Exclude patients with baseline CKD (Renal_Disease = 1)
-# S5: Restrict to anti-PD-1/PD-L1 monotherapy only
+# S1: ΔCr ≥0.3 mg/dL (KDIGO Stage 1a, most sensitive)
+# S2: Cr ≥2.0× baseline (KDIGO Stage 2, moderate-severe)
+# S3: Cr ≥3.0× baseline (KDIGO Stage 3, severe)
+# S4: 180-day observation window
+# S5: Exclude patients with baseline CKD (Renal_Disease = 1)
+# S6: Restrict to anti-PD-1/PD-L1 monotherapy only
 #
 # Usage: Rscript 03_sensitivity.R ici_aki
 # ══════════════════════════════════════════════════════════════════════
@@ -133,87 +134,92 @@ run_sensitivity <- function(data, label, outcome_col = "Treatment") {
 
 
 # ══════════════════════════════════════════════════════════════════════
-# S1: KDIGO Stage 1+ (Cr ≥1.5× baseline)
+# S1: ΔCr ≥0.3 mg/dL (KDIGO Stage 1a, most sensitive)
 # ══════════════════════════════════════════════════════════════════════
-if ("aki_kdigo1" %in% names(regression_bm)) {
+if ("aki_delta03" %in% names(regression_bm)) {
   s1_data <- regression_bm
-  s1_data$Treatment <- s1_data$aki_kdigo1
-  s1_coefs <- run_sensitivity(s1_data, "S1_KDIGO_Stage1")
+  s1_data$Treatment <- s1_data$aki_delta03
+  s1_coefs <- run_sensitivity(s1_data, "S1_delta_03")
 }
 
 # ══════════════════════════════════════════════════════════════════════
-# S2: KDIGO Stage 3 (Cr ≥3.0× baseline)
+# S2: Cr ≥2.0× baseline (KDIGO Stage 2, moderate-severe)
+# ══════════════════════════════════════════════════════════════════════
+if ("aki_kdigo2" %in% names(regression_bm)) {
+  s2_data <- regression_bm
+  s2_data$Treatment <- s2_data$aki_kdigo2
+  s2_coefs <- run_sensitivity(s2_data, "S2_KDIGO_Stage2")
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# S3: Cr ≥3.0× baseline (KDIGO Stage 3, severe — descriptive only)
 # ══════════════════════════════════════════════════════════════════════
 if ("aki_kdigo3" %in% names(regression_bm)) {
-  s2_data <- regression_bm
-  s2_data$Treatment <- s2_data$aki_kdigo3
-  s2_coefs <- run_sensitivity(s2_data, "S2_KDIGO_Stage3")
+  s3_data <- regression_bm
+  s3_data$Treatment <- s3_data$aki_kdigo3
+  s3_coefs <- run_sensitivity(s3_data, "S3_KDIGO_Stage3")
 }
 
 # ══════════════════════════════════════════════════════════════════════
-# S3: 180-day observation window
+# S4: 180-day observation window (primary threshold ≥1.5×)
 # ══════════════════════════════════════════════════════════════════════
 if ("aki_180d" %in% names(regression_bm)) {
-  s3_data <- regression_bm
-  s3_data$Treatment <- s3_data$aki_180d
-  s3_coefs <- run_sensitivity(s3_data, "S3_180day_window")
+  s4_data <- regression_bm
+  s4_data$Treatment <- s4_data$aki_180d
+  s4_coefs <- run_sensitivity(s4_data, "S4_180day_window")
 }
 
 # ══════════════════════════════════════════════════════════════════════
-# S4: Exclude patients with baseline CKD
+# S5: Exclude patients with baseline CKD
 # ══════════════════════════════════════════════════════════════════════
 if ("Renal_Disease" %in% names(regression_bm)) {
-  s4_data <- regression_bm %>% filter(Renal_Disease == 0)
-  # Remove Renal_Disease from como for this model
-  como_s4 <- setdiff(como, "Renal_Disease")
-  base_terms_s4 <- c("f.sex", "f.age")
-  if (has_race) base_terms_s4 <- c(base_terms_s4, "f.race")
-  if (has_ethnicity) base_terms_s4 <- c(base_terms_s4, "f.ethnicity")
-  if (has_cancer) base_terms_s4 <- c(base_terms_s4, "f.cancer")
-  if (has_ici) base_terms_s4 <- c(base_terms_s4, "f.ici")
-  base_terms_s4 <- c(base_terms_s4, como_s4, nephro)
+  s5_data <- regression_bm %>% filter(Renal_Disease == 0)
+  como_s5 <- setdiff(como, "Renal_Disease")
+  base_terms_s5 <- c("f.sex", "f.age")
+  if (has_race) base_terms_s5 <- c(base_terms_s5, "f.race")
+  if (has_ethnicity) base_terms_s5 <- c(base_terms_s5, "f.ethnicity")
+  if (has_cancer) base_terms_s5 <- c(base_terms_s5, "f.cancer")
+  if (has_ici) base_terms_s5 <- c(base_terms_s5, "f.ici")
+  base_terms_s5 <- c(base_terms_s5, como_s5, nephro)
 
-  # Need custom run since base_terms differ
   cat("\n", rep("=", 60), "\n", sep = "")
-  cat("SENSITIVITY: S4_no_CKD\n")
-  cat("  N=", nrow(s4_data), "\n")
+  cat("SENSITIVITY: S5_no_CKD\n")
+  cat("  N=", nrow(s5_data), "\n")
 
-  rhs_s4 <- paste(c(base_terms_s4, "strata(stratum)"), collapse = " + ")
-  f_s4 <- as.formula(
-    paste("Surv(rep(1, nrow(s4_data)), Treatment) ~", rhs_s4)
+  rhs_s5 <- paste(c(base_terms_s5, "strata(stratum)"), collapse = " + ")
+  f_s5 <- as.formula(
+    paste("Surv(rep(1, nrow(s5_data)), Treatment) ~", rhs_s5)
   )
-  fit_s4 <- tryCatch(
-    coxph(f_s4, data = s4_data, method = "exact"),
+  fit_s5 <- tryCatch(
+    coxph(f_s5, data = s5_data, method = "exact"),
     error = function(e) { cat("  ERROR:", e$message, "\n"); NULL }
   )
-  if (!is.null(fit_s4)) {
-    s_s4 <- summary(fit_s4)
-    s4_coefs <- data.frame(
-      variable = rownames(s_s4$coefficients),
-      coef = s_s4$coefficients[, "coef"],
-      exp_coef = s_s4$coefficients[, "exp(coef)"],
-      se = s_s4$coefficients[, "se(coef)"],
-      z = s_s4$coefficients[, "z"],
-      p = s_s4$coefficients[, "Pr(>|z|)"],
-      lower95 = s_s4$conf.int[, "lower .95"],
-      upper95 = s_s4$conf.int[, "upper .95"],
-      model = "S4_no_CKD",
+  if (!is.null(fit_s5)) {
+    s_s5 <- summary(fit_s5)
+    s5_coefs <- data.frame(
+      variable = rownames(s_s5$coefficients),
+      coef = s_s5$coefficients[, "coef"],
+      exp_coef = s_s5$coefficients[, "exp(coef)"],
+      se = s_s5$coefficients[, "se(coef)"],
+      z = s_s5$coefficients[, "z"],
+      p = s_s5$coefficients[, "Pr(>|z|)"],
+      lower95 = s_s5$conf.int[, "lower .95"],
+      upper95 = s_s5$conf.int[, "upper .95"],
+      model = "S5_no_CKD",
       stringsAsFactors = FALSE, row.names = NULL
     )
-    write_csv(s4_coefs, file.path(RESULTS, "sensitivity_S4_no_CKD_coefficients.csv"))
-    cat("  Saved: sensitivity_S4_no_CKD_coefficients.csv\n")
+    write_csv(s5_coefs, file.path(RESULTS, "sensitivity_S5_no_CKD_coefficients.csv"))
+    cat("  Saved: sensitivity_S5_no_CKD_coefficients.csv\n")
   }
 }
 
 # ══════════════════════════════════════════════════════════════════════
-# S5: Anti-PD-1/PD-L1 monotherapy only
+# S6: Anti-PD-1/PD-L1 monotherapy only
 # ══════════════════════════════════════════════════════════════════════
 if (has_ici) {
-  s5_data <- regression_bm %>%
+  s6_data <- regression_bm %>%
     filter(ici_regimen %in% c("anti_pd1", "anti_pdl1"))
-  # Remove ICI regimen from model (since restricted)
-  base_terms_s5 <- setdiff(base_terms, "f.ici")
-  s5_coefs <- run_sensitivity(s5_data, "S5_PD1_PDL1_mono")
+  s6_coefs <- run_sensitivity(s6_data, "S6_PD1_PDL1_mono")
 }
 
 
