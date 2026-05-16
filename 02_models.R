@@ -63,11 +63,13 @@ if (dir.exists(file.path("results", COHORT))) {
 }
 cat("Results dir:", RESULTS, "\n")
 
-# Find matched file (try both old and new naming)
+# Find matched file (try all naming conventions from PSM output)
 matched_files <- c(
+  file.path(RESULTS, "09_regression_base.csv"),
   file.path(RESULTS, "08_regression_base_matched.csv"),
   file.path(RESULTS, "09_regression_base_matched.csv"),
-  file.path(RESULTS, "07_pre_matching_base.csv")  # fallback to pre-matched
+  file.path(RESULTS, "08_regression_base.csv")
+  # NOTE: do NOT fall back to 07_pre_matching_base.csv — it has no stratum column
 )
 matched_file <- NULL
 for (f in matched_files) {

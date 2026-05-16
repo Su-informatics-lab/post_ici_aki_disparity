@@ -57,9 +57,10 @@ if (dir.exists(file.path("results", COHORT))) {
 }
 
 matched_files <- c(
+  file.path(RESULTS, "09_regression_base.csv"),
   file.path(RESULTS, "08_regression_base_matched.csv"),
   file.path(RESULTS, "09_regression_base_matched.csv"),
-  file.path(RESULTS, "07_pre_matching_base.csv")
+  file.path(RESULTS, "08_regression_base.csv")
 )
 matched_file <- NULL
 for (f in matched_files) {
