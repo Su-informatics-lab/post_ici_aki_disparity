@@ -82,6 +82,9 @@ ICI_CONCEPTS = {
         "pembrolizumab":  [1547220, 35806277],
         "cemiplimab":     [2108241],
         "dostarlimab":    [2549766],
+        "retifanlimab":   [],  # TODO: fill from 00_recon_feasibility.py output
+        "toripalimab":    [],  # TODO: fill from 00_recon_feasibility.py output
+        "tislelizumab":   [],  # TODO: fill from 00_recon_feasibility.py output
     },
     "anti_pdl1": {
         "atezolizumab":   [1792776],
@@ -248,50 +251,169 @@ print(f"  Excluded (pre-existing ESKD/dialysis/transplant): {n_eskd:,}")
 print(f"  After ESKD exclusion: {len(cohort):,}")
 
 # ── 1f. Serum creatinine: baseline + follow-up ────────────────────
+# Best practice for baseline Cr in ICI-AKI studies:
+#   PRIMARY:     Median of outpatient Cr in [-365d, -7d] pre-ICI
+#                (excludes 7d immediately before ICI to avoid treatment-day draws)
+#   SENSITIVITY: Most-recent Cr in [-365d, -1d] (AlcRx approach)
+#   SENSITIVITY: Nadir (lowest) Cr in [-365d, -7d] (Cortazar/ICPi-AKI approach)
+#
+# Rationale: Cancer patients have volatile Cr from chemo, contrast, dehydration.
+# Median outpatient smooths transient spikes; nadir is most conservative (maximizes
+# sensitivity for AKI detection); most-recent is simplest but least stable.
+#
+# Cr concept: auto-discovered in AlcRx as 3016723 (AoU LOINC 2160-0).
+# Recon script (00) will confirm. We also query by concept_code as fallback.
+# ─────────────────────────────────────────────────────────────────────
 pids_str = ",".join(map(str, cohort.person_id.tolist()))
 
 cr_sql = f"""
 SELECT
   m.person_id,
   m.measurement_date,
-  m.value_as_number AS cr_value
+  m.value_as_number AS cr_value,
+  m.unit_concept_id,
+  m.unit_source_value,
+  vo.visit_concept_id
 FROM `{CDR}`.measurement m
-WHERE m.measurement_concept_id IN (
-    SELECT concept_id FROM `{CDR}`.concept
-    WHERE LOWER(concept_code) = '2160-0'
-      AND vocabulary_id = 'LOINC'
-)
+LEFT JOIN `{CDR}`.visit_occurrence vo
+  ON m.person_id = vo.person_id
+  AND m.measurement_date BETWEEN vo.visit_start_date
+      AND COALESCE(vo.visit_end_date, vo.visit_start_date)
+WHERE (m.measurement_concept_id = 3016723
+       OR m.measurement_concept_id IN (
+           SELECT concept_id FROM `{CDR}`.concept
+           WHERE concept_code = '2160-0' AND vocabulary_id = 'LOINC'))
   AND m.value_as_number IS NOT NULL
   AND m.value_as_number > 0
-  AND m.value_as_number < 30  -- plausibility filter
+  AND m.value_as_number < 30000  -- allows µmol/L
   AND m.person_id IN ({pids_str})
 ORDER BY m.person_id, m.measurement_date
 """
-cr_all = query(cr_sql, "Serum creatinine")
+cr_all = query(cr_sql, "Serum creatinine + visit context")
 cr_all["measurement_date"] = pd.to_datetime(cr_all["measurement_date"])
 print(f"  Total Cr measurements: {len(cr_all):,}")
 print(f"  Patients with any Cr: {cr_all.person_id.nunique():,}")
+
+# ── Unit conversion: µmol/L → mg/dL ──────────────────────────────
+# µmol/L values are typically 44–1300; mg/dL values are 0.3–15.
+# Strategy: use unit_concept_id / unit_source_value if available,
+# otherwise use value-range heuristic (threshold = 30).
+# OMOP unit_concept_id: 8840 = mg/dL, 8749 = µmol/L
+UMOL_TO_MGDL = 0.0113  # 1 µmol/L = 0.0113 mg/dL
+
+def convert_cr(row):
+    val = row["cr_value"]
+    unit_id = row.get("unit_concept_id", None)
+    unit_src = str(row.get("unit_source_value", "")).lower().strip()
+
+    # Method 1: explicit unit concept ID
+    if unit_id == 8749:  # µmol/L
+        return val * UMOL_TO_MGDL
+    if unit_id == 8840:  # mg/dL
+        return val
+
+    # Method 2: unit_source_value string matching
+    if "umol" in unit_src or "µmol" in unit_src or "micromol" in unit_src:
+        return val * UMOL_TO_MGDL
+    if "mg" in unit_src:
+        return val
+
+    # Method 3: value-range heuristic
+    if val >= 30:  # almost certainly µmol/L
+        return val * UMOL_TO_MGDL
+
+    return val  # assume mg/dL
+
+cr_all["cr_mgdl"] = cr_all.apply(convert_cr, axis=1)
+
+# Report conversion stats
+n_converted = ((cr_all["cr_value"] != cr_all["cr_mgdl"]) &
+               (cr_all["cr_mgdl"] > 0)).sum()
+print(f"  Cr unit conversions (µmol/L → mg/dL): {n_converted:,} "
+      f"({n_converted/len(cr_all)*100:.1f}%)")
+print(f"  Cr (mg/dL) median: {cr_all['cr_mgdl'].median():.2f}, "
+      f"IQR: {cr_all['cr_mgdl'].quantile(0.25):.2f}–"
+      f"{cr_all['cr_mgdl'].quantile(0.75):.2f}")
+
+# Apply plausibility filter on converted values
+cr_all = cr_all[(cr_all["cr_mgdl"] > 0.1) & (cr_all["cr_mgdl"] < 30)].copy()
+cr_all["cr_value"] = cr_all["cr_mgdl"]  # overwrite with standardized values
+
+# ── Visit-type classification for outpatient restriction ──────────
+# Outpatient: 9202, 581476, 38004515
+# ED: 9203
+# Inpatient: 9201, 32037, 262, 8717
+OUTPATIENT_VISITS = [9202, 581476, 38004515]
+ED_VISITS = [9203]
+INPATIENT_VISITS = [9201, 32037, 262, 8717]
+
+cr_all["visit_setting"] = "unknown"
+cr_all.loc[cr_all["visit_concept_id"].isin(OUTPATIENT_VISITS), "visit_setting"] = "outpatient"
+cr_all.loc[cr_all["visit_concept_id"].isin(ED_VISITS), "visit_setting"] = "ed"
+cr_all.loc[cr_all["visit_concept_id"].isin(INPATIENT_VISITS), "visit_setting"] = "inpatient"
+
+print(f"  Visit setting distribution:")
+print(f"    {cr_all.visit_setting.value_counts().to_dict()}")
+
+cr_all.drop(columns=["cr_mgdl", "unit_concept_id", "unit_source_value",
+                      "visit_concept_id"], inplace=True)
 
 # Merge index date
 cr_all = cr_all.merge(cohort[["person_id", "ici_index_date"]], on="person_id")
 cr_all["days_from_index"] = (cr_all["measurement_date"] - cr_all["ici_index_date"]).dt.days
 
-# Baseline Cr: most recent Cr in [-365, -1] window before ICI index
-cr_baseline = cr_all[
+# ── Baseline Cr: THREE approaches ─────────────────────────────────
+# Window: [-365d, -7d] for primary; [-365d, -1d] for sensitivity
+cr_baseline_window = cr_all[
+    (cr_all["days_from_index"] >= -365) & (cr_all["days_from_index"] <= -7)
+].copy()
+
+cr_baseline_window_sens = cr_all[
     (cr_all["days_from_index"] >= -365) & (cr_all["days_from_index"] <= -1)
 ].copy()
-cr_baseline = cr_baseline.sort_values("measurement_date").groupby("person_id").tail(1)
-cr_baseline = cr_baseline[["person_id", "cr_value"]].rename(
-    columns={"cr_value": "baseline_cr"}
+
+# PRIMARY: Median of OUTPATIENT Cr in [-365d, -7d]
+cr_outpatient = cr_baseline_window[
+    cr_baseline_window["visit_setting"].isin(["outpatient", "unknown"])
+]
+baseline_median = cr_outpatient.groupby("person_id").agg(
+    baseline_cr=("cr_value", "median"),
+    n_baseline_cr=("cr_value", "count"),
+).reset_index()
+
+# SENSITIVITY A: Most recent Cr in [-365d, -1d] (AlcRx approach)
+baseline_recent = cr_baseline_window_sens.sort_values("measurement_date")
+baseline_recent = baseline_recent.groupby("person_id").tail(1)
+baseline_recent = baseline_recent[["person_id", "cr_value"]].rename(
+    columns={"cr_value": "baseline_cr_recent"}
 )
-print(f"  Patients with baseline Cr: {len(cr_baseline):,}")
+
+# SENSITIVITY B: Nadir (lowest) Cr in [-365d, -7d] (Cortazar/ICPi-AKI)
+baseline_nadir = cr_baseline_window.groupby("person_id").agg(
+    baseline_cr_nadir=("cr_value", "min"),
+).reset_index()
+
+# Merge all baseline approaches
+cr_baseline = baseline_median.merge(baseline_recent, on="person_id", how="outer")
+cr_baseline = cr_baseline.merge(baseline_nadir, on="person_id", how="outer")
+
+# Fill primary baseline: if no outpatient, fall back to most-recent
+cr_baseline["baseline_cr"] = cr_baseline["baseline_cr"].fillna(
+    cr_baseline["baseline_cr_recent"]
+)
+
+print(f"\n  Baseline Cr approaches:")
+print(f"    Median outpatient [-365d,-7d]: {baseline_median.shape[0]:,} patients")
+print(f"    Most recent [-365d,-1d]:       {baseline_recent.shape[0]:,} patients")
+print(f"    Nadir [-365d,-7d]:             {baseline_nadir.shape[0]:,} patients")
+print(f"    Combined (any baseline):       {cr_baseline.shape[0]:,} patients")
 
 # Follow-up Cr: any Cr in [1, 365] window after ICI index
 cr_followup = cr_all[
     (cr_all["days_from_index"] >= 1) & (cr_all["days_from_index"] <= 365)
 ].copy()
 pts_with_followup = cr_followup.person_id.unique()
-print(f"  Patients with follow-up Cr: {len(pts_with_followup):,}")
+print(f"  Patients with follow-up Cr [1-365d]: {len(pts_with_followup):,}")
 
 # ── 1g. AKI phenotyping ──────────────────────────────────────────
 # Merge baseline Cr with follow-up, compute ratio
