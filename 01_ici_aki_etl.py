@@ -76,45 +76,12 @@ def save(df, filename):
 # Includes ingredient-level + branded forms. Extend as needed after
 # running a pilot query (see STEP 1 feasibility block).
 
-ICI_CONCEPTS = {
-    "anti_pd1": {
-        "nivolumab":      [1597876, 35804429],
-        "pembrolizumab":  [1547220, 35806277],
-        "cemiplimab":     [2108241],
-        "dostarlimab":    [2549766],
-        "retifanlimab":   [],  # TODO: fill from 00_recon_feasibility.py output
-        "toripalimab":    [],  # TODO: fill from 00_recon_feasibility.py output
-        "tislelizumab":   [],  # TODO: fill from 00_recon_feasibility.py output
-    },
-    "anti_pdl1": {
-        "atezolizumab":   [1792776],
-        "durvalumab":     [2003754],
-        "avelumab":       [1921248],
-    },
-    "anti_ctla4": {
-        "ipilimumab":     [1094833, 40171888],
-        "tremelimumab":   [2555986],
-    },
-    "anti_lag3": {
-        "relatlimab":     [37003920],  # combo with nivolumab
-    },
-}
-
-# Flatten to a single list + build class lookup
-ALL_ICI_IDS = []
-ICI_CLASS_MAP = {}  # concept_id -> class
-ICI_DRUG_MAP = {}   # concept_id -> drug name
-for cls, drugs in ICI_CONCEPTS.items():
-    for drug, ids in drugs.items():
-        for cid in ids:
-            ALL_ICI_IDS.append(cid)
-            ICI_CLASS_MAP[cid] = cls
-            ICI_DRUG_MAP[cid] = drug
-
-ICI_IDS_STR = ",".join(map(str, ALL_ICI_IDS))
+# ICI agents are identified via concept_name matching in Step 1
+# (name-based matching is more robust across CDR versions than hardcoded concept IDs)
 
 # Creatinine LOINC (serum/plasma creatinine)
 CR_LOINC = "2160-0"  # Standard LOINC for serum creatinine
+# Also auto-discovered in AlcRx as measurement_concept_id = 3016723
 
 # ESKD / dialysis / transplant exclusion codes
 ESKD_ICD10 = ["N186"]
@@ -134,18 +101,47 @@ print("STEP 1: ICI-Treated Cancer Cohort + AKI Phenotyping")
 print("=" * 70)
 
 # ── 1a. Find all patients with ICI drug exposures ─────────────────
+# Use name-based matching (proven in recon) instead of hardcoded concept IDs
+ICI_DRUG_NAMES = [
+    "nivolumab", "pembrolizumab", "cemiplimab", "dostarlimab",
+    "retifanlimab", "toripalimab", "tislelizumab",
+    "atezolizumab", "durvalumab", "avelumab",
+    "ipilimumab", "tremelimumab", "relatlimab",
+]
+ICI_LIKE_SQL = " OR ".join(
+    [f"LOWER(c.concept_name) LIKE '%{d}%'" for d in ICI_DRUG_NAMES]
+)
+
+# Map drug names to ICI class for regimen classification
+ICI_NAME_TO_CLASS = {}
+for d in ["nivolumab","pembrolizumab","cemiplimab","dostarlimab",
+          "retifanlimab","toripalimab","tislelizumab"]:
+    ICI_NAME_TO_CLASS[d] = "anti_pd1"
+for d in ["atezolizumab","durvalumab","avelumab"]:
+    ICI_NAME_TO_CLASS[d] = "anti_pdl1"
+for d in ["ipilimumab","tremelimumab"]:
+    ICI_NAME_TO_CLASS[d] = "anti_ctla4"
+ICI_NAME_TO_CLASS["relatlimab"] = "anti_lag3"
+
 ici_sql = f"""
 SELECT
-  person_id,
-  drug_concept_id,
-  drug_exposure_start_date AS ici_date
-FROM `{CDR}`.drug_exposure
-WHERE drug_concept_id IN ({ICI_IDS_STR})
-ORDER BY person_id, ici_date
+  de.person_id,
+  de.drug_concept_id,
+  de.drug_exposure_start_date AS ici_date,
+  LOWER(c.concept_name) AS drug_name
+FROM `{CDR}`.drug_exposure de
+JOIN `{CDR}`.concept c ON c.concept_id = de.drug_concept_id
+WHERE {ICI_LIKE_SQL}
+ORDER BY de.person_id, de.drug_exposure_start_date
 """
 ici_raw = query(ici_sql, "ICI drug exposures")
 print(f"  Total ICI exposure records: {len(ici_raw):,}")
 print(f"  Unique patients with any ICI: {ici_raw.person_id.nunique():,}")
+
+if len(ici_raw) == 0:
+    print("\n  ⚠ FATAL: No ICI exposures found. Check CDR version.")
+    print("  Run 00_recon_feasibility.py first to verify concept names.")
+    import sys; sys.exit(1)
 
 # Index date = first ICI exposure
 ici_index = ici_raw.groupby("person_id").agg(
@@ -159,10 +155,20 @@ ici_raw["ici_date"] = pd.to_datetime(ici_raw["ici_date"])
 ici_raw = ici_raw.merge(ici_index, on="person_id")
 ici_raw["days_from_index"] = (ici_raw["ici_date"] - ici_raw["ici_index_date"]).dt.days
 ici_window = ici_raw[ici_raw["days_from_index"] <= 30].copy()
-ici_window["ici_class"] = ici_window["drug_concept_id"].map(ICI_CLASS_MAP)
+
+# Classify each row's ICI class from drug_name
+def get_ici_class(drug_name):
+    for key, cls in ICI_NAME_TO_CLASS.items():
+        if key in str(drug_name).lower():
+            return cls
+    return "unknown"
+
+ici_window["ici_class"] = ici_window["drug_name"].apply(get_ici_class)
 
 def classify_regimen(group):
-    classes = set(group["ici_class"])
+    classes = set(group["ici_class"]) - {"unknown"}
+    if len(classes) == 0:
+        return "unknown"
     if len(classes) > 1:
         return "combination"
     return classes.pop()
