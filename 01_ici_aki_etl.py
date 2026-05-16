@@ -74,6 +74,14 @@ def parse_date(s):
     return pd.to_datetime(s, errors="coerce")
 
 
+# ── CONSORT flowchart tracking ────────────────────────────────────
+consort = {}
+
+# Total AoU participants
+total_sql = f"SELECT COUNT(DISTINCT person_id) AS n FROM `{CDR}.person`"
+consort["total_aou"] = q(total_sql).n.iloc[0]
+print(f"  Total AoU participants: {consort['total_aou']:,}")
+
 # ═══════════════════════════════════════════════════════════════════
 # STEP 1: ICI COHORT + AKI PHENOTYPING
 # ═══════════════════════════════════════════════════════════════════
@@ -125,6 +133,7 @@ GROUP BY de.person_id
 ici_patients = q(ici_sql)
 ici_patients["ici_index_date"] = parse_date(ici_patients["ici_index_date"])
 print(f"  ICI-treated patients: {len(ici_patients):,}")
+consort["ici_treated"] = len(ici_patients)
 
 # ── 1c. Cancer diagnosis filter ──────────────────────────────────
 cancer_sql = f"""
@@ -139,6 +148,8 @@ WHERE c.vocabulary_id = 'ICD10CM'
 cancer_pts = q(cancer_sql)
 ici_cancer = ici_patients[ici_patients.person_id.isin(cancer_pts.person_id)]
 print(f"  ICI + cancer: {len(ici_cancer):,}")
+consort["cancer_pts_total"] = len(cancer_pts)
+consort["ici_cancer"] = len(ici_cancer)
 
 # ── 1d. Basics Survey filter ─────────────────────────────────────
 basics_sql = f"""
@@ -149,6 +160,8 @@ WHERE observation_source_concept_id = 1585845
 basics_pts = q(basics_sql)
 ici_cancer_basics = ici_cancer[ici_cancer.person_id.isin(basics_pts.person_id)]
 print(f"  ICI + cancer + Basics Survey: {len(ici_cancer_basics):,}")
+consort["ici_cancer_basics"] = len(ici_cancer_basics)
+consort["excluded_no_basics"] = len(ici_cancer) - len(ici_cancer_basics)
 
 # ── 1e. Creatinine extraction ────────────────────────────────────
 cr_concept = 3016723  # LOINC 2160-0
@@ -190,6 +203,7 @@ baseline = (
     .reset_index()
 )
 print(f"  Patients with baseline Cr: {len(baseline):,}")
+consort["has_baseline_cr"] = len(baseline)
 
 # Follow-up: Cr in [1, 365]
 followup_cr = cr_merged[
@@ -204,6 +218,7 @@ followup = (
     .reset_index()
 )
 print(f"  Patients with follow-up Cr: {len(followup):,}")
+consort["has_followup_cr"] = len(followup)
 
 # Merge baseline + follow-up
 eligible = ici_cancer_basics.merge(baseline, on="person_id").merge(
@@ -227,6 +242,9 @@ eligible = eligible[~eligible.person_id.isin(eskd_pts.person_id)]
 eligible = eligible[eligible.baseline_cr < 4.0]
 print(f"  Excluded ESKD/transplant/baseline≥4: {pre_eskd - len(eligible)}")
 print(f"  Eligible cohort: {len(eligible):,}")
+consort["pre_eskd_exclusion"] = pre_eskd
+consort["excluded_eskd"] = pre_eskd - len(eligible)
+consort["eligible"] = len(eligible)
 
 # ── 1h. AKI phenotyping ──────────────────────────────────────────
 eligible["max_cr_ratio"] = eligible.max_followup_cr / eligible.baseline_cr
@@ -255,6 +273,22 @@ cases = eligible.severity.sum()
 controls = (eligible.severity == 0).sum()
 print(f"  Cases (Cr ≥1.5×): {cases:,} ({cases/len(eligible)*100:.1f}%)")
 print(f"  Controls:          {controls:,}")
+consort["cases"] = int(cases)
+consort["controls"] = int(controls)
+consort["excluded_no_baseline"] = (
+    consort["ici_cancer_basics"] - consort["has_baseline_cr"]
+)
+consort["excluded_no_followup"] = (
+    consort["has_baseline_cr"] - consort["pre_eskd_exclusion"]
+)
+
+# Save CONSORT numbers
+consort_df = pd.DataFrame([consort]).T.reset_index()
+consort_df.columns = ["step", "n"]
+save(consort_df, "00_consort_numbers.csv")
+print("\n  CONSORT flowchart:")
+for step, n in consort.items():
+    print(f"    {step:35s} {int(n):>10,}")
 
 save(eligible, "01_eligible_cohort.csv")
 
@@ -528,20 +562,21 @@ inc = sdoh_raw[sdoh_raw.observation_source_concept_id == 1585375].copy()
 
 
 def classify_income(name):
+    # CDR C2024Q3R9 values: "Annual Income: less 10k", "Annual Income: 10k 25k", etc.
     if pd.isna(name):
         return "Unknown"
     n = str(name).lower()
-    if "10,000" in n or "less than" in n or "$10" in n:
+    if "less 10k" in n:
         return "lt10k"
-    if "10,001" in n or "25,000" in n or "15,000" in n or "20,000" in n:
+    if "10k 25k" in n:
         return "10k_25k"
-    if "25,001" in n or "35,000" in n or "50,000" in n:
+    if "25k 35k" in n or "35k 50k" in n:
         return "25k_50k"
-    if "50,001" in n or "75,000" in n:
+    if "50k 75k" in n:
         return "50k_75k"
-    if "75,001" in n or "100,000" in n:
+    if "75k 100k" in n:
         return "75k_100k"
-    if "100,001" in n or "150,000" in n or "200,000" in n or "more" in n:
+    if "100k 150k" in n or "150k 200k" in n or "more 200k" in n:
         return "gt100k"
     if "skip" in n or "prefer not" in n:
         return "Unknown"
@@ -556,18 +591,26 @@ edu = sdoh_raw[sdoh_raw.observation_source_concept_id == 1585940].copy()
 
 
 def classify_education(name):
+    # CDR C2024Q3R9: "Highest Grade: Never Attended", "One Through Four",
+    # "Five Through Eight", "Nine Through Eleven", "Twelve Or GED",
+    # "College One to Three", "College Graduate", "Advanced Degree"
     if pd.isna(name):
         return "Unknown"
     n = str(name).lower()
-    if "never" in n or "grades 1" in n or "grade 1" in n:
+    if (
+        "never" in n
+        or "one through four" in n
+        or "five through eight" in n
+        or "nine through eleven" in n
+    ):
         return "lt_HS"
-    if "high school" in n or "ged" in n or "grade 12" in n:
+    if "twelve" in n or "ged" in n:
         return "HS_GED"
-    if "some college" in n or "one year" in n or "associate" in n:
+    if "college one" in n or "one to three" in n:
         return "Some_College"
-    if "college" in n or "bachelor" in n or "four year" in n:
+    if "college graduate" in n:
         return "College"
-    if "master" in n or "doctorate" in n or "professional" in n or "graduate" in n:
+    if "advanced" in n:
         return "Graduate"
     if "skip" in n or "prefer not" in n:
         return "Unknown"
@@ -612,16 +655,20 @@ hou = sdoh_raw[sdoh_raw.observation_source_concept_id == 1585370].copy()
 
 
 def classify_housing(name):
+    # CDR C2024Q3R9: "Current Home Own: Own", "Current Home Own: Rent",
+    # "Current Home Own: Other Arrangement"
+    # BUG FIX: "rent" is substring of "cuRRENT" and "own" is in prefix.
+    # Must match the value AFTER the colon.
     if pd.isna(name):
         return "Unknown"
     n = str(name).lower()
-    if "own" in n:
-        return "Own"
-    if "rent" in n:
+    if ": rent" in n:
         return "Rent"
-    if "other" in n or "arrangement" in n:
+    if ": other" in n or "arrangement" in n:
         return "Other_Arrangement"
-    if "skip" in n or "prefer not" in n:
+    if ": own" in n:
+        return "Own"
+    if "skip" in n or "prefer not" in n or "dont know" in n:
         return "Unknown"
     return "Unknown"
 
@@ -634,12 +681,13 @@ stab = sdoh_raw[sdoh_raw.observation_source_concept_id == 1585886].copy()
 
 
 def classify_stability(name):
+    # CDR C2024Q3R9: "Stable House Concern: No", "Stable House Concern: Yes"
     if pd.isna(name):
         return "Unknown"
     n = str(name).lower()
-    if "not worried" in n or "not at all" in n:
+    if "concern: no" in n:
         return "Stable"
-    if "worried" in n or "somewhat" in n or "very" in n:
+    if "concern: yes" in n:
         return "Unstable"
     if "skip" in n or "prefer not" in n:
         return "Unknown"
