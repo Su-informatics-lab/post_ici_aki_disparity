@@ -41,6 +41,9 @@ DATA = "/N/project/depot/hw56/irAKI_data/structured_data"
 RESULTS = "results/inpc"
 os.makedirs(RESULTS, exist_ok=True)
 
+# ── CONSORT flowchart tracking ────────────────────────────────────
+consort = {}
+
 print("=" * 70)
 print("POST-ICI AKI — INPC ETL (v2 — NCI-CCI scoring fix)")
 print("=" * 70)
@@ -64,6 +67,7 @@ def parse_date(s):
 # ═══════════════════════════════════════════════════════════════════
 print("\n  Loading core tables...")
 person = pd.read_csv(f"{DATA}/r6335_person.csv", low_memory=False)
+consort["total_inpc"] = len(person)
 print(f"  person: {len(person):,}")
 
 drug = pd.read_csv(
@@ -211,6 +215,7 @@ drug_names = (
 )
 drug_names.columns = ["person_id", "ici_drugs"]
 ici_patients = ici_patients.merge(drug_names, on="person_id", how="left")
+consort["ici_treated"] = len(ici_patients)
 print(f"  ICI-treated patients: {len(ici_patients):,}")
 
 # ── QC: ICI class breakdown ──────────────────────────────────────
@@ -256,6 +261,8 @@ cond["icd_clean"] = (
 cancer_mask = cond.icd_clean.str.match(r"^C\d|^D0\d|^D[1234]\d", na=False)
 cancer_pts = cond[cancer_mask].person_id.unique()
 ici_cancer = ici_patients[ici_patients.person_id.isin(cancer_pts)]
+consort["cancer_pts_total"] = len(cancer_pts)
+consort["ici_cancer"] = len(ici_cancer)
 print(f"  ICI + cancer: {len(ici_cancer):,}")
 
 # ── 1c. Creatinine extraction ────────────────────────────────────
@@ -286,6 +293,7 @@ baseline = (
     .reset_index()
 )
 print(f"  Patients with baseline Cr: {len(baseline):,}")
+consort["has_baseline_cr"] = len(baseline)
 
 followup_cr = cr_merged[
     (cr_merged.days_from_ici >= 1) & (cr_merged.days_from_ici <= 365)
@@ -299,6 +307,7 @@ followup = (
     .reset_index()
 )
 print(f"  Patients with follow-up Cr: {len(followup):,}")
+consort["has_followup_cr"] = len(followup)
 
 eligible = ici_cancer.merge(baseline, on="person_id").merge(followup, on="person_id")
 
@@ -311,6 +320,10 @@ eskd_pts = cond[eskd_mask].person_id.unique()
 pre_eskd = len(eligible)
 eligible = eligible[~eligible.person_id.isin(eskd_pts)]
 eligible = eligible[eligible.baseline_cr < 4.0]
+consort["pre_eskd_exclusion"] = pre_eskd
+consort["excluded_eskd"] = pre_eskd - len(eligible)
+consort["eligible"] = len(eligible)
+consort["excluded_no_baseline"] = consort["ici_cancer"] - consort["has_baseline_cr"]
 print(f"  Excluded ESKD/transplant/baseline≥4: {pre_eskd - len(eligible)}")
 print(f"  Eligible cohort: {len(eligible):,}")
 
@@ -336,8 +349,18 @@ eligible["aki_180d"] = (
 
 cases = eligible.severity.sum()
 controls = (eligible.severity == 0).sum()
+consort["cases"] = int(cases)
+consort["controls"] = int(controls)
 print(f"  Cases (Cr ≥1.5×): {cases:,} ({cases/len(eligible)*100:.1f}%)")
 print(f"  Controls:          {controls:,}")
+
+# ── Save CONSORT numbers ─────────────────────────────────────────
+consort_df = pd.DataFrame([consort]).T.reset_index()
+consort_df.columns = ["step", "n"]
+save(consort_df, "00_consort_numbers.csv")
+print("\n  CONSORT flowchart:")
+for step, n in consort.items():
+    print(f"    {step:35s} {int(n):>10,}")
 
 save(eligible, "01_eligible_cohort.csv")
 
