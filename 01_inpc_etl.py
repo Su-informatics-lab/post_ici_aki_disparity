@@ -72,6 +72,7 @@ drug = pd.read_csv(
     usecols=[
         "person_id",
         "drug_concept_id",
+        "drug_source_concept_id",
         "drug_exposure_start_date",
         "drug_source_value",
     ],
@@ -133,19 +134,40 @@ ici_concept = concept[
     )
 ]
 ici_concept_ids = set(ici_concept.concept_id.tolist())
+print(f"  ICI concept IDs from concept table: {len(ici_concept_ids)}")
 
-# Match by concept_id
+# Match by drug_concept_id
 ici_by_concept = drug[drug.drug_concept_id.isin(ici_concept_ids)]
+print(
+    f"    drug_concept_id matches: {len(ici_by_concept):,} records, "
+    f"{ici_by_concept.person_id.nunique():,} patients"
+)
 
-# Also match by source value (free text)
+# Match by drug_source_concept_id (PD-L1 drugs often mapped here in INPC)
+drug["drug_source_concept_id"] = pd.to_numeric(
+    drug["drug_source_concept_id"], errors="coerce"
+)
+ici_by_source_concept = drug[drug.drug_source_concept_id.isin(ici_concept_ids)]
+print(
+    f"    drug_source_concept_id matches: {len(ici_by_source_concept):,} records, "
+    f"{ici_by_source_concept.person_id.nunique():,} patients"
+)
+
+# Match by source value (free text keyword)
 ici_by_source = drug[
     drug.drug_source_value.str.lower().apply(
         lambda x: any(a in str(x) for a in ICI_AGENTS) if pd.notna(x) else False
     )
 ]
+print(
+    f"    drug_source_value keyword matches: {len(ici_by_source):,} records, "
+    f"{ici_by_source.person_id.nunique():,} patients"
+)
 
-ici_drug = pd.concat([ici_by_concept, ici_by_source]).drop_duplicates()
-print(f"  ICI drug records: {len(ici_drug):,}")
+ici_drug = pd.concat(
+    [ici_by_concept, ici_by_source_concept, ici_by_source]
+).drop_duplicates()
+print(f"  ICI drug records (union): {len(ici_drug):,}")
 
 # Index date + drug list per patient
 ici_drug["drug_exposure_start_date"] = parse_date(ici_drug["drug_exposure_start_date"])
@@ -157,21 +179,71 @@ ici_patients = (
     .reset_index()
 )
 
-# Build drug list
-drug_list = ici_drug.merge(
-    concept[["concept_id", "concept_name"]],
+# Build drug list — resolve names from BOTH concept ID columns
+# (PD-L1 drugs may only have names via drug_source_concept_id)
+drug_list = ici_drug.copy()
+drug_list = drug_list.merge(
+    concept[["concept_id", "concept_name"]].rename(
+        columns={"concept_name": "name_from_concept"}
+    ),
     left_on="drug_concept_id",
     right_on="concept_id",
     how="left",
+).drop(columns=["concept_id"], errors="ignore")
+drug_list = drug_list.merge(
+    concept[["concept_id", "concept_name"]].rename(
+        columns={"concept_name": "name_from_source_concept"}
+    ),
+    left_on="drug_source_concept_id",
+    right_on="concept_id",
+    how="left",
+).drop(columns=["concept_id"], errors="ignore")
+# Prefer name_from_concept, fall back to name_from_source_concept, then drug_source_value
+drug_list["resolved_name"] = (
+    drug_list["name_from_concept"]
+    .fillna(drug_list["name_from_source_concept"])
+    .fillna(drug_list["drug_source_value"])
 )
 drug_names = (
     drug_list.groupby("person_id")
-    .concept_name.apply(lambda x: list(x.dropna().str.lower().unique()))
+    .resolved_name.apply(lambda x: list(x.dropna().str.lower().unique()))
     .reset_index()
 )
 drug_names.columns = ["person_id", "ici_drugs"]
 ici_patients = ici_patients.merge(drug_names, on="person_id", how="left")
 print(f"  ICI-treated patients: {len(ici_patients):,}")
+
+# ── QC: ICI class breakdown ──────────────────────────────────────
+_has_pd1 = ici_patients.ici_drugs.apply(
+    lambda x: (
+        any(
+            a in " ".join(str(d) for d in x)
+            for a in ["nivolumab", "pembrolizumab", "cemiplimab", "dostarlimab"]
+        )
+        if isinstance(x, list)
+        else False
+    )
+)
+_has_pdl1 = ici_patients.ici_drugs.apply(
+    lambda x: (
+        any(
+            a in " ".join(str(d) for d in x)
+            for a in ["atezolizumab", "durvalumab", "avelumab"]
+        )
+        if isinstance(x, list)
+        else False
+    )
+)
+_has_ctla4 = ici_patients.ici_drugs.apply(
+    lambda x: (
+        any(a in " ".join(str(d) for d in x) for a in ["ipilimumab", "tremelimumab"])
+        if isinstance(x, list)
+        else False
+    )
+)
+print(f"    anti-PD-1:  {_has_pd1.sum():,}")
+print(f"    anti-PD-L1: {_has_pdl1.sum():,}")
+print(f"    anti-CTLA-4: {_has_ctla4.sum():,}")
 
 # ── 1b. Cancer diagnosis filter ──────────────────────────────────
 # INPC condition_source_value format: "1284^^H35.341" — extract after ^^
