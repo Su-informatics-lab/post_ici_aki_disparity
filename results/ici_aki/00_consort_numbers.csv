@@ -1,0 +1,16 @@
+step,n
+total_aou,633547
+ici_treated,998
+cancer_pts_total,130662
+ici_cancer,825
+ici_cancer_basics,824
+excluded_no_basics,1
+has_baseline_cr,639
+has_followup_cr,684
+pre_eskd_exclusion,615
+excluded_eskd,4
+eligible,611
+cases,128
+controls,483
+excluded_no_baseline,185
+excluded_no_followup,24
