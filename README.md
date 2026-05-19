@@ -1,101 +1,66 @@
 # Post-ICI AKI × Social Determinants of Health
 
-Propensity-matched case-control analysis of survey-derived SDoH and
-all-cause acute kidney injury (AKI) in ICI-treated cancer patients
-from the NIH *All of Us* Research Program.
+Two-cohort propensity-matched case-control study of social determinants
+of health and acute kidney injury in immune checkpoint inhibitor–treated
+cancer patients.
 
-**Target:** JAMIA (Research and Applications)
-**Template:** Gatz et al., *JAMIA* 2024;31(12):2932–2939; Wang et al. (COVID-19)
-
-## Design
-
-- **Population:** Cancer patients treated with immune checkpoint inhibitors (ICIs) in AoU
-- **Cases:** All-cause AKI (serum creatinine ≥2.0× baseline) within 365 days of first ICI
-- **Controls:** ICI patients without AKI in the same window
-- **Matching:** 1:4 nearest-neighbor PSM with replacement, 0.2 SD caliper
-- **Analysis:** Conditional logistic regression (clogit)
-- **CCI:** NCI 14-condition Charlson (cancer-specific; excludes Malignancy/Metastatic)
-- **SDoH:** 6 domains (insurance, income, education, employment, housing, disability)
-
-## Pipeline
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  DATA (01*)  — runs on AoU Researcher Workbench                 │
-├─────────────────────────────────────────────────────────────────┤
-│  01_ici_aki_etl.py    AoU ETL (BigQuery → CSV)                  │
-│    Steps 1–7: ICI cohort, AKI phenotyping, demographics,        │
-│    NCI-CCI, SDoH, cancer type, nephrotoxins, matching vars      │
-│  01b_psm.R            PSM via MatchIt + cobalt balance          │
-├─────────────────────────────────────────────────────────────────┤
-│  MODELS (02–03)  — runs on Workbench, reads CSV                 │
-├─────────────────────────────────────────────────────────────────┤
-│  02_models.R          Base + 6 SDoH domain + joint + race       │
-│                       attenuation                               │
-│  03_sensitivity.R     S1–S5 sensitivity specifications          │
-├─────────────────────────────────────────────────────────────────┤
-│  OUTPUT (04–06)  — TBD                                          │
-├─────────────────────────────────────────────────────────────────┤
-│  04_tables.py         Table 1, Table 2                          │
-│  05_figures.py        Forest plots, CONSORT, attenuation        │
-│  06_supplement.py     eTables                                   │
-└─────────────────────────────────────────────────────────────────┘
-```
+- **INPC** (primary) — ICI-treated cancer patients from the Indiana Network for Patient Care
+- **All of Us** (validation) — ICI-treated cancer patients with 6 SDoH domains from the Basics Survey
 
 ## Reproduction
 
 ```bash
-# ── AoU (on Researcher Workbench) ──────────────────────────
-python 01_ici_aki_etl.py              # Steps 1–7: cohort → pre-matching base
-Rscript 01b_psm.R ici_aki             # PSM → matched cohort + balance
-Rscript 02_models.R ici_aki           # Base + 6 SDoH domain + joint + race attenuation
-Rscript 03_sensitivity.R ici_aki      # S1–S5 sensitivity analyses
+# ── INPC (Quartz HPC, /N/project/depot/hw56/irAKI_data/) ───
+python 01_inpc_etl.py                # ETL → results/inpc/01–07
+Rscript 01b_psm.R inpc              # 1:4 NN PSM with replacement
+Rscript 02_models.R inpc            # base model
+Rscript 03_sensitivity.R inpc       # S1–S5
+
+# ── AoU (Researcher Workbench, CDR C2024Q3R9) ──────────────
+python 01_aou_etl.py                 # ETL → results/ici_aki/01–07
+Rscript 01b_psm.R ici_aki           # 1:4 NN PSM with replacement
+Rscript 02_models.R ici_aki         # base + 6 SDoH domain + joint + race attenuation
+Rscript 03_sensitivity.R ici_aki    # S1–S5
+
+# ── Tables & Figures ───────────────────────────────────────
+python 04_tables.py                  # Table 1, Table 2
+python 05_figures.py                 # Figures 1–3
+python 06_supplement.py              # eTables, eFigures
 ```
 
-## Key Differences from COVID Pipeline (aou_covid)
+## Pipeline
 
-| Component | COVID (aou_covid) | This study |
-|-----------|------------------|------------|
-| Population | COVID+ AoU participants | ICI-treated cancer patients |
-| Outcome | COVID-19 hospitalization (14d) | All-cause AKI (Cr ≥2.0× baseline, 365d) |
-| CCI | Glasheen 19-item | **NCI 14-condition** |
-| Additional covariates | Vaccination, pandemic wave | Cancer type, ICI class, nephrotoxins |
-| MarketScan arm | Yes | No (v1) |
+| Step | Script | Environment | Output |
+|------|--------|-------------|--------|
+| ETL | `01_inpc_etl.py` | Quartz HPC | `results/inpc/01–07_*.csv` |
+| ETL | `01_aou_etl.py` | AoU Workbench | `results/ici_aki/01–07_*.csv` |
+| PSM | `01b_psm.R` | R 4.5+ | `08_matched_cohort.csv`, `08c_smd_balance.csv` |
+| Models | `02_models.R` | R 4.5+ | `*_coefficients.csv`, `race_attenuation.csv` |
+| Sensitivity | `03_sensitivity.R` | R 4.5+ | `all_sensitivity_coefficients.csv` |
+| Shared | `nci_cci_scoring.py` | Python 3.10+ | NCI 14-condition CCI (both cohorts) |
 
-## Sensitivity Analyses
+## Key Methods
 
-| ID | Analysis | Rationale |
-|----|----------|-----------|
-| S1 | Cr ≥1.5× (KDIGO Stage 1+) | More sensitive threshold |
-| S2 | Cr ≥3.0× (KDIGO Stage 3) | Severe AKI only |
-| S3 | 180-day window | Earlier-onset AKI |
-| S4 | Exclude baseline CKD | Remove pre-existing kidney disease |
-| S5 | Anti-PD-1/PD-L1 mono only | Most common regimen |
+- **AKI phenotype:** Serum creatinine ≥1.5× baseline within 365 days of first ICI, with 90-day pre-ICI washout, baseline Cr fallback [-365,−7] → [-365,−1], and CKD-EPI 2021 eGFR
+- **Matching:** 1:4 nearest-neighbor PSM with replacement, 0.2 SD caliper
+- **Analysis:** Exact conditional logistic regression (clogit)
+- **Comorbidity:** NCI 14-condition Charlson (excludes Malignancy/Metastatic)
+- **SDoH (AoU only):** Insurance, income, education, employment, housing, housing stability
+
+## Data Access
+
+- **INPC:** De-identified extract available from corresponding author under DUA with Indiana University and Regenstrief Institute
+- **All of Us:** Controlled Tier via [Researcher Workbench](https://workbench.researchallofus.org)
+- Person-level CSVs are `.gitignore`d. Only aggregate model outputs (`*_coefficients.csv`, `*_balance.csv`) are committed.
 
 ## Requirements
 
 ```
-Python  3.10+
-  pandas, numpy
-
-R       4.5.x
-  survival        3.8+
-  MatchIt         4.7+
-  cobalt          4.6+
-  dplyr           1.1+
-  readr           2.1+
-  sandwich        3.1+
-  lmtest          0.9+
+Python 3.10+    pandas, numpy
+R 4.5+          survival, MatchIt, cobalt, dplyr, readr, sandwich, lmtest
 ```
-
-## License
-
-[MIT](LICENSE)
 
 ## Contact
 
-- [Jing Su](mailto:su1@iu.edu) — PI
-- [Haining Wang](mailto:hw56@iu.edu) — pipeline lead
-
-Su Lab in Biomedical Informatics, Biostatistics & Health Data Science
-Indiana University School of Medicine
+[Haining Wang](mailto:hw56@iu.edu) · [Jing Su](mailto:su1@iu.edu)
+Su Lab — Biostatistics & Health Data Science, Indiana University School of Medicine
