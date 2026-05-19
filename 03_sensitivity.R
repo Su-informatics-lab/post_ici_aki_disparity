@@ -1,17 +1,14 @@
 #!/usr/bin/env Rscript
 # ══════════════════════════════════════════════════════════════════════
-# Post-ICI AKI × SDoH — Sensitivity Analyses (v2 — NCI-CCI scoring fix)
+# Post-ICI AKI × SDoH — Sensitivity Analyses (v5)
 #
-# S1: AKI ≥0.3 mg/dL absolute increase (Delta Cr)
-# S2: AKI ≥2.0× baseline (KDIGO Stage 2)
-# S3: AKI ≥3.0× baseline (KDIGO Stage 3)
+# S1: AKI >=0.3 mg/dL absolute increase (Delta Cr)
+# S2: AKI >=2.0x baseline (KDIGO Stage 2)
+# S3: AKI >=3.0x baseline (KDIGO Stage 3)
 # S4: 180-day follow-up window (vs 365d)
-# S5: Mono-ICI only (exclude combo regimens)
+# S5: Mono-ICI only (exclude CTLA-4 containing regimens)
 #
-# CCI FIX (v2): Same as 02_models.R — uses corrected charlson_score
-# or nci_index from v2 ETL. See 02_models.R header for details.
-#
-# Usage: Rscript 03_sensitivity.R ici_aki
+# Usage: Rscript 03_sensitivity.R aou
 #        Rscript 03_sensitivity.R inpc
 # ══════════════════════════════════════════════════════════════════════
 
@@ -20,7 +17,11 @@ USE_NCI_INDEX <- FALSE
 # ─────────────────────────────────────────────────────────────────────
 
 args <- commandArgs(trailingOnly = TRUE)
-COHORT <- if (length(args) > 0) args[1] else "ici_aki"
+if (length(args) < 1 || !args[1] %in% c("aou", "inpc")) {
+  stop("Usage: Rscript 03_sensitivity.R [aou|inpc]")
+}
+MODE <- args[1]
+COHORT <- ifelse(MODE == "aou", "ici_aki", "inpc")
 
 # ── R library path (Quartz HPC compatibility) ────────────────────────
 user_lib <- file.path(Sys.getenv("HOME"), "R", "library")
@@ -38,8 +39,8 @@ library(dplyr)
 library(readr)
 
 cat("\n", rep("=", 70), "\n", sep = "")
-cat("POST-ICI AKI × SDoH — SENSITIVITY ANALYSES (v2 — NCI-CCI fix)\n")
-cat("Cohort:", COHORT, "\n")
+cat("POST-ICI AKI × SDoH — SENSITIVITY ANALYSES (v5)\n")
+cat("Cohort:", MODE, "->", COHORT, "\n")
 cat("CCI mode:", ifelse(USE_NCI_INDEX, "NCI continuous index", "Charlson integer score"), "\n")
 cat(rep("=", 70), "\n", sep = "")
 
@@ -104,7 +105,7 @@ has_cancer <- any(c("cancer_type_collapsed", "cancer_type") %in% names(regressio
 if (has_cancer) {
   if ("cancer_type_collapsed" %in% names(regression_bm)) {
     regression_bm$f.cancer <- factor(regression_bm$cancer_type_collapsed,
-      levels = c("Lung", "Melanoma", "Other"))
+      levels = c("Lung", "Melanoma", "Renal_Cell", "Other"))
   } else {
     regression_bm$f.cancer <- factor(regression_bm$cancer_type)
   }
@@ -114,7 +115,7 @@ has_ici <- any(c("ici_collapsed", "ici_regimen") %in% names(regression_bm))
 if (has_ici) {
   if ("ici_collapsed" %in% names(regression_bm)) {
     regression_bm$f.ici <- factor(regression_bm$ici_collapsed,
-      levels = c("anti_pd1", "other_combo"))
+      levels = c("anti_pd1", "anti_pdl1", "ctla4_containing"))
   } else {
     regression_bm$f.ici <- factor(regression_bm$ici_regimen)
   }
@@ -258,7 +259,8 @@ if ("aki_180d" %in% names(regression_bm)) {
 # S5: Mono-ICI only (exclude combo regimens)
 if ("ici_regimen" %in% names(regression_bm) || "ici_collapsed" %in% names(regression_bm)) {
   mono_col <- ifelse("ici_collapsed" %in% names(regression_bm), "ici_collapsed", "ici_regimen")
-  mono_data <- regression_bm[!grepl("combo", regression_bm[[mono_col]], ignore.case = TRUE), ]
+  # v5: ici_collapsed uses "ctla4_containing" for combo + ctla4 mono
+  mono_data <- regression_bm[!grepl("ctla4", regression_bm[[mono_col]], ignore.case = TRUE), ]
 
   if (nrow(mono_data) > 0 && sum(mono_data$severity == 1) >= 10) {
     # Remove ICI factor (only one level after filtering)
@@ -332,6 +334,6 @@ if (nrow(all_sens) > 0) {
 }
 
 cat("\n", rep("=", 70), "\n", sep = "")
-cat("SENSITIVITY ANALYSES COMPLETE (v2 — NCI-CCI fix)\n")
+cat("SENSITIVITY ANALYSES COMPLETE (v5)\n")
 cat(rep("=", 70), "\n", sep = "")
 cat("Done.\n")

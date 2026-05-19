@@ -1,20 +1,18 @@
 #!/usr/bin/env Rscript
 # ══════════════════════════════════════════════════════════════════════
-# Post-ICI AKI × SDoH — Model Fitting (v2 — NCI-CCI scoring fix)
+# Post-ICI AKI × SDoH — Model Fitting (v5)
 #
 # Adapted from aou_covid/02_models.R (Wang et al.)
 # Runs on: AoU Researcher Workbench or Quartz HPC
 #
-# CCI FIX (v2, 2026-05-16):
-#   The Python ETL now produces BOTH scores:
-#     - charlson_score: Charlson integer weights (corrected MI/hierarchy)
-#     - nci_index:      NCI Cox-model continuous weights (Stedman, 5 decimal)
-#     - nci_cci_score:  = charlson_score (backward compat alias)
-#   DEFAULT: uses nci_cci_score (Charlson integer). Set USE_NCI_INDEX=TRUE
-#   below to switch to the NCI continuous index for cancer-specific
-#   comorbidity adjustment.
+# v5 changes:
+#   - Cancer: 4-level (Lung [ref], Melanoma, Renal_Cell, Other)
+#   - ICI: 3-level (anti_pd1 [ref], anti_pdl1, ctla4_containing)
+#   - baseline_egfr: EXCLUDED from base model (mediator, not confounder)
+#     NCI-CCI renal disease flag provides coarse CKD adjustment.
+#     eGFR kept in CSV for Table 1 descriptives.
 #
-# Usage: Rscript 02_models.R ici_aki
+# Usage: Rscript 02_models.R aou
 #        Rscript 02_models.R inpc
 # ══════════════════════════════════════════════════════════════════════
 
@@ -24,7 +22,11 @@ USE_NCI_INDEX <- FALSE
 # ─────────────────────────────────────────────────────────────────────
 
 args <- commandArgs(trailingOnly = TRUE)
-COHORT <- if (length(args) > 0) args[1] else "ici_aki"
+if (length(args) < 1 || !args[1] %in% c("aou", "inpc")) {
+  stop("Usage: Rscript 02_models.R [aou|inpc]")
+}
+MODE <- args[1]
+COHORT <- ifelse(MODE == "aou", "ici_aki", "inpc")
 
 # ── R library path (Quartz HPC compatibility) ────────────────────────
 user_lib <- file.path(Sys.getenv("HOME"), "R", "library")
@@ -43,8 +45,8 @@ library(dplyr)
 library(readr)
 
 cat("\n", rep("=", 70), "\n", sep = "")
-cat("POST-ICI AKI × SDoH — MODEL FITTING (v2 — NCI-CCI fix)\n")
-cat("Cohort:", COHORT, "\n")
+cat("POST-ICI AKI × SDoH — MODEL FITTING (v5)\n")
+cat("Cohort:", MODE, "->", COHORT, "\n")
 cat("CCI mode:", ifelse(USE_NCI_INDEX, "NCI continuous index", "Charlson integer score"), "\n")
 cat(rep("=", 70), "\n", sep = "")
 
@@ -130,7 +132,7 @@ has_cancer <- any(c("cancer_type_collapsed", "cancer_type") %in% names(regressio
 if (has_cancer) {
   if ("cancer_type_collapsed" %in% names(regression_bm)) {
     regression_bm$f.cancer <- factor(regression_bm$cancer_type_collapsed,
-      levels = c("Lung", "Melanoma", "Other"))
+      levels = c("Lung", "Melanoma", "Renal_Cell", "Other"))
   } else {
     regression_bm$f.cancer <- factor(regression_bm$cancer_type)
   }
@@ -141,7 +143,7 @@ has_ici <- any(c("ici_collapsed", "ici_regimen") %in% names(regression_bm))
 if (has_ici) {
   if ("ici_collapsed" %in% names(regression_bm)) {
     regression_bm$f.ici <- factor(regression_bm$ici_collapsed,
-      levels = c("anti_pd1", "other_combo"))
+      levels = c("anti_pd1", "anti_pdl1", "ctla4_containing"))
   } else {
     regression_bm$f.ici <- factor(regression_bm$ici_regimen)
   }
@@ -191,8 +193,8 @@ if (has_ici) base_terms <- c(base_terms, "f.ici")
 base_terms <- c(base_terms, como_terms, nephro)
 # Baseline eGFR (CKD-EPI 2021, computed from baseline Cr)
 if ("baseline_egfr" %in% names(regression_bm)) {
-  base_terms <- c(base_terms, "baseline_egfr")
-  cat("  Baseline eGFR: included in base model\n")
+  # base_terms <- c(base_terms, "baseline_egfr")  # REMOVED v5: mediator, not confounder (see eMethods)
+  cat("  Baseline eGFR: in CSV for Table 1 only (mediator, excluded from base model)\n")
 }
 
 base_rhs <- paste(c(base_terms, "strata(stratum)"), collapse = " + ")
@@ -385,6 +387,6 @@ if (!is.null(all_coefs) && nrow(all_coefs) > 0) {
 }
 
 cat("\n", rep("=", 70), "\n", sep = "")
-cat("MODEL FITTING COMPLETE (v2 — NCI-CCI scoring fix)\n")
+cat("MODEL FITTING COMPLETE (v5)\n")
 cat("CCI mode:", ifelse(USE_NCI_INDEX, "NCI continuous index", "Charlson integer score"), "\n")
 cat(rep("=", 70), "\n", sep = "")
