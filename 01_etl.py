@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """
-Post-ICI AKI x SDoH -- Consolidated ETL (v5)
+Post-ICI AKI x SDoH -- Consolidated ETL (v6)
 Usage:  python 01_etl.py aou      # AoU Workbench (BigQuery)
         python 01_etl.py inpc     # Quartz HPC (local CSV)
 
-v5 changes vs v4:
-  - Cancer collapse: Lung [ref], Melanoma, Renal_Cell, Other  (was 3-level)
-  - ICI collapse:    anti_pd1 [ref], anti_pdl1, ctla4_containing  (was binary)
+v6 changes vs v5:
+  - AKI phenotype aligned with dualr-graph (01_etl_quartz.py):
+    Cr >=1.5x baseline  OR  AKI ICD (N17/584) + severe/incident visit
+  - Primary window: 180 days (was 365)
+  - 365-day kept as sensitivity column (aki_365d / severity_12m)
+  - Washout: Cr-based OR ICD-based (union), 90d pre-ICI
+  - Cancer collapse: Lung [ref], Melanoma, Other  (Renal_Cell into Other)
+  - ICI collapse:    anti_pd1 [ref], anti_pdl1, ctla4_containing
   - baseline_egfr:   kept in CSV for Table 1; excluded from base model in R
-                     (mediator on SDoH->AKI pathway, not confounder)
 
 Phenotype:
   - Baseline Cr: median [-365,-7], fallback last [-365,-1]
-  - Pre-ICI AKI washout: Cr >=1.5x in [-90, 0] excluded
+  - AKI: Cr >=1.5x baseline OR AKI ICD (N17/584) + severe/incident visit
+  - Primary window: 180 days; 365-day as sensitivity
+  - Pre-ICI washout: Cr >=1.5x OR AKI ICD in [-90, 0] excluded
   - Cr plausibility: >= 0.1 mg/dL
   - Nephrotoxins: [-90, 0] days pre-ICI only
   - Baseline eGFR: CKD-EPI 2021 race-free
@@ -120,6 +126,15 @@ SDOH_CONCEPTS = {
     "housing_stability": 1585886,
 }
 
+# ── v6: AKI ICD codes + severe visit types + window config ────────
+AKI_ICD_PREFIXES = {"9": ["584"], "10": ["N17"]}
+AKI_ICD_NORM = [
+    p.upper().replace(".", "") for codes in AKI_ICD_PREFIXES.values() for p in codes
+]
+SEVERE_VISIT_CONCEPTS = {9201, 9203, 262, 8717, 8782}
+PRIMARY_WINDOW_DAYS = 180
+SENSITIVITY_WINDOW_DAYS = 365
+
 
 # =====================================================================
 # SHARED HELPERS
@@ -222,10 +237,10 @@ def compute_egfr(baseline_cr, age, is_female):
 
 # ── v5: Cancer and ICI collapse functions ────────────────────────
 def collapse_cancer(cancer_type):
-    """4-level: Lung [ref], Melanoma, Renal_Cell, Other.
-    Renal_Cell separated because of intrinsic renal implications
-    (nephrectomy, single kidney) in an AKI study."""
-    if cancer_type in ("Lung", "Melanoma", "Renal_Cell"):
+    """3-level: Lung [ref], Melanoma, Other.
+    v5.1/v6: Renal_Cell folded back into Other (saves 1 df at EPV ~10).
+    Renal_Cell (N=53 AoU) not significant in base model."""
+    if cancer_type in ("Lung", "Melanoma"):
         return cancer_type
     return "Other"
 
@@ -286,23 +301,118 @@ def compute_baseline_followup(cr_merged, eligible_pids):
     return baseline, followup, len(bl_primary), len(bl_fb_only)
 
 
-def apply_aki_phenotype(eligible, cr_merged):
-    """Apply AKI definitions + sensitivity thresholds."""
+def apply_aki_phenotype(eligible, cr_merged, icd_first=None):
+    """Apply AKI definitions: Cr >=1.5x OR ICD+severe (v6 dual phenotype).
+
+    Args:
+        eligible: DataFrame with person_id, baseline_cr, ici_index_date, etc.
+        cr_merged: Creatinine measurements merged with ICI dates (has days_from_ici).
+        icd_first: DataFrame with [person_id, icd_evt_date] — first ICD-based AKI
+                   event per patient (already filtered for severe/incident). None if
+                   no ICD data available (shouldn't happen in v6).
+
+    Returns:
+        eligible with severity (180d primary), sensitivity columns, evt_source.
+    """
     eligible = eligible.copy()
     eligible["max_cr_ratio"] = eligible.max_followup_cr / eligible.baseline_cr
     eligible["max_delta_cr"] = eligible.max_followup_cr - eligible.baseline_cr
-    eligible["severity"] = (eligible.max_cr_ratio >= 1.5).astype(int)
-    eligible["aki_delta03"] = (eligible.max_delta_cr >= 0.3).astype(int)
-    eligible["aki_kdigo2"] = (eligible.max_cr_ratio >= 2.0).astype(int)
-    eligible["aki_kdigo3"] = (eligible.max_cr_ratio >= 3.0).astype(int)
-    # 180-day window
-    fu180 = cr_merged[(cr_merged.days_from_ici >= 1) & (cr_merged.days_from_ici <= 180)]
-    max180 = fu180.groupby("person_id").value_as_number.max().reset_index()
-    max180.columns = ["person_id", "max_cr_180"]
-    eligible = eligible.merge(max180, on="person_id", how="left")
-    eligible["aki_180d"] = (
-        ((eligible.max_cr_180 / eligible.baseline_cr) >= 1.5).astype(int).fillna(0)
+
+    # ── Cr-based event dates (first Cr >=1.5x within 365d) ────────
+    fu = cr_merged[
+        (cr_merged.days_from_ici >= 1)
+        & (cr_merged.days_from_ici <= SENSITIVITY_WINDOW_DAYS)
+    ].copy()
+    fu = fu.merge(eligible[["person_id", "baseline_cr"]], on="person_id")
+    fu["cr_ratio"] = fu.value_as_number / fu.baseline_cr
+    cr_events = fu[fu.cr_ratio >= 1.5].copy()
+    if len(cr_events) > 0:
+        cr_first = (
+            cr_events.sort_values("measurement_date")
+            .groupby("person_id")
+            .first()
+            .reset_index()[["person_id", "measurement_date"]]
+            .rename(columns={"measurement_date": "cr_evt_date"})
+        )
+    else:
+        cr_first = pd.DataFrame(columns=["person_id", "cr_evt_date"])
+
+    # ── Union: Cr + ICD (earliest event wins) ─────────────────────
+    eligible = eligible.merge(cr_first, on="person_id", how="left")
+    if icd_first is not None and len(icd_first) > 0:
+        eligible = eligible.merge(icd_first, on="person_id", how="left")
+    else:
+        eligible["icd_evt_date"] = pd.NaT
+
+    cok = eligible.cr_evt_date.notna()
+    iok = eligible.icd_evt_date.notna()
+    cr_wins = cok & (~iok | (eligible.cr_evt_date <= eligible.icd_evt_date))
+    icd_wins = iok & (~cok | (eligible.icd_evt_date < eligible.cr_evt_date))
+
+    eligible["evt_date"] = pd.NaT
+    eligible.loc[cr_wins, "evt_date"] = eligible.loc[cr_wins, "cr_evt_date"]
+    eligible.loc[icd_wins, "evt_date"] = eligible.loc[icd_wins, "icd_evt_date"]
+    eligible["evt_source"] = "none"
+    eligible.loc[cr_wins, "evt_source"] = "cr"
+    eligible.loc[icd_wins, "evt_source"] = "icd"
+    eligible["evt_days"] = (eligible.evt_date - eligible.ici_index_date).dt.days
+
+    # ── Primary: 180-day window ───────────────────────────────────
+    eligible["severity"] = 0
+    eligible.loc[
+        (eligible.evt_source != "none") & (eligible.evt_days <= PRIMARY_WINDOW_DAYS),
+        "severity",
+    ] = 1
+
+    # ── Sensitivity: 365-day window ───────────────────────────────
+    eligible["severity_12m"] = (eligible.evt_source != "none").astype(int)
+    eligible["aki_365d"] = eligible["severity_12m"]
+
+    # ── Cr-only sensitivity thresholds (within primary window) ────
+    # These use Cr ratios only; ICD events don't have lab values
+    fu_primary = cr_merged[
+        (cr_merged.days_from_ici >= 1)
+        & (cr_merged.days_from_ici <= PRIMARY_WINDOW_DAYS)
+    ]
+    max_primary = (
+        fu_primary.groupby("person_id")
+        .value_as_number.max()
+        .reset_index()
+        .rename(columns={"value_as_number": "max_cr_primary"})
     )
+    eligible = eligible.merge(max_primary, on="person_id", how="left")
+    eligible["max_ratio_primary"] = eligible.max_cr_primary / eligible.baseline_cr
+    eligible["max_delta_primary"] = eligible.max_cr_primary - eligible.baseline_cr
+
+    eligible["aki_delta03"] = (
+        (eligible.max_delta_primary >= 0.3).fillna(False)
+        | (eligible.evt_source == "icd")  # ICD-coded AKI counts as >=0.3
+    ).astype(int)
+    # Only count within primary window for delta03
+    eligible.loc[
+        (eligible.evt_source == "icd") & (eligible.evt_days > PRIMARY_WINDOW_DAYS),
+        "aki_delta03",
+    ] = 0
+
+    eligible["aki_kdigo2"] = (
+        (eligible.max_ratio_primary >= 2.0).fillna(False).astype(int)
+    )
+    eligible["aki_kdigo3"] = (
+        (eligible.max_ratio_primary >= 3.0).fillna(False).astype(int)
+    )
+
+    # Print summary
+    n_cr = int((eligible.evt_source == "cr").sum())
+    n_icd = int((eligible.evt_source == "icd").sum())
+    n_primary = int(eligible.severity.sum())
+    n_12m = int(eligible.severity_12m.sum())
+    print(f"  AKI events (union, <={SENSITIVITY_WINDOW_DAYS}d): {n_12m}")
+    print(f"    Cr-first: {n_cr}, ICD-first: {n_icd}")
+    print(
+        f"  PRIMARY events (<={PRIMARY_WINDOW_DAYS}d): {n_primary} ({n_primary/len(eligible)*100:.1f}%)"
+    )
+    print(f"  12-month events (sensitivity): {n_12m} ({n_12m/len(eligible)*100:.1f}%)")
+
     return eligible
 
 
@@ -329,6 +439,67 @@ def build_nci_cci(person_ids, dx_df, icd_col="icd_code"):
     charlson["nci_index"] = compute_nci_index(charlson)
     charlson["nci_cci_score"] = charlson["charlson_score"]  # R compat
     return charlson
+
+
+# ── v6: ICD-based AKI event computation (shared) ─────────────────
+def compute_icd_aki(aki_icd_df, eligible, severe_visits=None):
+    """Compute ICD-based AKI events and washout from AKI ICD records.
+
+    Args:
+        aki_icd_df: DataFrame [person_id, condition_start_date, visit_occurrence_id]
+        eligible: DataFrame with [person_id, ici_index_date]
+        severe_visits: set of visit_occurrence_ids that are ED/inpatient, or None
+                       (if None, all visits accepted)
+
+    Returns:
+        icd_first: DataFrame [person_id, icd_evt_date] — first post-ICI ICD event
+        washout_icd_pids: set of person_ids with pre-ICI AKI ICD codes
+    """
+    if len(aki_icd_df) == 0:
+        return (
+            pd.DataFrame(columns=["person_id", "icd_evt_date"]),
+            set(),
+        )
+
+    aki = aki_icd_df.copy()
+    aki["condition_start_date"] = parse_date(aki.condition_start_date)
+    aki = aki.merge(eligible[["person_id", "ici_index_date"]], on="person_id")
+    aki["days"] = (aki.condition_start_date - aki.ici_index_date).dt.days
+
+    # Filter by severe visit type (if visit table available)
+    if severe_visits is not None:
+        aki["visit_occurrence_id"] = pd.to_numeric(
+            aki.visit_occurrence_id, errors="coerce"
+        )
+        is_severe = aki.visit_occurrence_id.isin(severe_visits)
+    else:
+        is_severe = pd.Series(True, index=aki.index)
+
+    # Pre-ICI ICD AKI → washout
+    pre_icd = aki[(aki.days >= -90) & (aki.days <= 0)]
+    washout_icd_pids = set(int(p) for p in pre_icd.person_id.unique())
+
+    # Incident = no pre-ICI AKI ICD
+    is_incident = ~aki.person_id.isin(set(pre_icd.person_id))
+
+    # Keep: severe visit OR incident (same logic as dualr-graph)
+    aki = aki[is_severe | is_incident].copy()
+
+    # Post-ICI ICD events (1–365 days)
+    aki = aki[(aki.days >= 1) & (aki.days <= SENSITIVITY_WINDOW_DAYS)]
+
+    if len(aki) > 0:
+        icd_first = (
+            aki.sort_values("condition_start_date")
+            .groupby("person_id")
+            .first()
+            .reset_index()[["person_id", "condition_start_date"]]
+            .rename(columns={"condition_start_date": "icd_evt_date"})
+        )
+    else:
+        icd_first = pd.DataFrame(columns=["person_id", "icd_evt_date"])
+
+    return icd_first, washout_icd_pids
 
 
 # =====================================================================
@@ -469,7 +640,7 @@ def run_aou():
     consort = {}
 
     print("=" * 70)
-    print("POST-ICI AKI x SDoH -- AoU ETL (v5)")
+    print("POST-ICI AKI x SDoH -- AoU ETL (v6)")
     print("=" * 70)
     print(f"  CDR: {CDR}")
     print(f"  Output: {RESULTS}/")
@@ -583,30 +754,78 @@ def run_aou():
     consort["excluded_eskd"] = pre - len(eligible)
     print(f"  Excluded ESKD/transplant/baseline>=4: {pre - len(eligible)}")
 
-    # Pre-ICI washout
+    # Pre-ICI Cr washout
     pre_cr = cr_merged[
         (cr_merged.days_from_ici >= -90) & (cr_merged.days_from_ici <= 0)
     ]
     pre_cr = pre_cr.merge(eligible[["person_id", "baseline_cr"]], on="person_id")
-    washout = set(pre_cr[pre_cr.value_as_number / pre_cr.baseline_cr >= 1.5].person_id)
-    eligible = eligible[~eligible.person_id.isin(washout)].copy()
-    consort["excluded_washout"] = len(washout)
+    washout_cr = set(
+        pre_cr[pre_cr.value_as_number / pre_cr.baseline_cr >= 1.5].person_id
+    )
+    print(f"  Washout Cr-based (Cr >=1.5x in 90d pre-ICI): {len(washout_cr)}")
+
+    # v6: AKI ICD codes + severe visits
+    pids_elig_str = ",".join(str(x) for x in eligible.person_id.tolist())
+    aki_icd_prefixes_sql = " OR ".join(
+        [f"UPPER(REPLACE(c.concept_code, '.', '')) LIKE '{p}%'" for p in AKI_ICD_NORM]
+    )
+    aki_icd_df = q(f"""
+        SELECT co.person_id, co.condition_start_date, co.visit_occurrence_id
+        FROM `{CDR}.condition_occurrence` co
+        JOIN `{CDR}.concept` c ON c.concept_id = co.condition_source_concept_id
+        WHERE c.vocabulary_id IN ('ICD9CM','ICD10CM')
+          AND ({aki_icd_prefixes_sql})
+          AND co.person_id IN ({pids_elig_str})
+    """)
+    print(
+        f"  AKI ICD records: {len(aki_icd_df):,}, patients: {aki_icd_df.person_id.nunique():,}"
+    )
+
+    severe_concepts_sql = ",".join(str(c) for c in SEVERE_VISIT_CONCEPTS)
+    severe_visits_df = q(f"""
+        SELECT DISTINCT visit_occurrence_id
+        FROM `{CDR}.visit_occurrence`
+        WHERE person_id IN ({pids_elig_str})
+          AND visit_concept_id IN ({severe_concepts_sql})
+    """)
+    severe_visits = set(severe_visits_df.visit_occurrence_id)
+    print(f"  Severe visits (ED/inpatient): {len(severe_visits):,}")
+
+    icd_first, washout_icd = compute_icd_aki(aki_icd_df, eligible, severe_visits)
+    print(f"  Washout ICD-based (AKI ICD in 90d pre-ICI): {len(washout_icd)}")
+    print(f"  ICD AKI events (post-ICI): {len(icd_first):,}")
+
+    # v6: Union washout
+    washout_all = washout_cr | washout_icd
+    eligible = eligible[~eligible.person_id.isin(washout_all)].copy()
+    consort["excluded_washout"] = len(washout_all)
+    consort["excluded_washout_cr"] = len(washout_cr)
+    consort["excluded_washout_icd"] = len(washout_icd)
+    consort["excluded_washout_overlap"] = len(washout_cr & washout_icd)
     consort["eligible"] = len(eligible)
-    print(f"  Washout (Cr >=1.5x in 90d pre-ICI): {len(washout)} excluded")
+    print(
+        f"  Washout total: {len(washout_all)} excluded "
+        f"({len(washout_cr)} Cr, {len(washout_icd)} ICD, "
+        f"{len(washout_cr & washout_icd)} overlap)"
+    )
     print(f"  Eligible cohort: {len(eligible):,}")
 
-    # AKI phenotype
-    eligible = apply_aki_phenotype(eligible, cr_merged)
+    # AKI phenotype (v6: Cr OR ICD, 180d primary)
+    eligible = apply_aki_phenotype(eligible, cr_merged, icd_first)
     cases = eligible.severity.sum()
     consort["cases"] = int(cases)
     consort["controls"] = int(len(eligible) - cases)
+    consort["cases_12m"] = int(eligible.severity_12m.sum())
+    consort["primary_window_days"] = PRIMARY_WINDOW_DAYS
     consort["excluded_no_baseline"] = (
         consort["ici_cancer_basics"] - consort["has_baseline_cr"]
     )
     consort["excluded_no_followup"] = (
         consort["has_baseline_cr"] - consort["pre_eskd_exclusion"]
     )
-    print(f"  Cases (Cr >=1.5x): {cases:,} ({cases/len(eligible)*100:.1f}%)")
+    print(
+        f"  Cases ({PRIMARY_WINDOW_DAYS}d primary): {cases:,} ({cases/len(eligible)*100:.1f}%)"
+    )
     print(f"  Controls:          {len(eligible)-cases:,}")
 
     consort_df = pd.DataFrame([consort]).T.reset_index()
@@ -882,20 +1101,21 @@ def run_aou():
     print("\n" + "=" * 70)
     print("STEP 7: Regression Base Assembly")
     print("=" * 70)
-    reg = eligible[
-        [
-            "person_id",
-            "severity",
-            "ici_index_date",
-            "baseline_cr",
-            "max_cr_ratio",
-            "max_delta_cr",
-            "aki_delta03",
-            "aki_kdigo2",
-            "aki_kdigo3",
-            "aki_180d",
-        ]
-    ].copy()
+    reg_cols = [
+        "person_id",
+        "severity",
+        "severity_12m",
+        "aki_365d",
+        "ici_index_date",
+        "baseline_cr",
+        "max_cr_ratio",
+        "max_delta_cr",
+        "aki_delta03",
+        "aki_kdigo2",
+        "aki_kdigo3",
+        "evt_source",
+    ]
+    reg = eligible[[c for c in reg_cols if c in eligible.columns]].copy()
     reg = reg.merge(
         demo[
             [
@@ -930,9 +1150,9 @@ def run_aou():
     save(reg, "07_pre_matching_base.csv")
 
     print("\n" + "=" * 70)
-    print("AoU ETL COMPLETE (v5)")
+    print("AoU ETL COMPLETE (v6)")
     print("=" * 70)
-    print(f"  Next: Rscript 01b_psm.R ici_aki && Rscript 02_models.R ici_aki")
+    print(f"  Next: Rscript 01b_psm.R aou && Rscript 02_models.R aou")
 
 
 # =====================================================================
@@ -942,7 +1162,7 @@ def run_inpc():
     consort = {}
 
     print("=" * 70)
-    print("POST-ICI AKI -- INPC ETL (v5)")
+    print("POST-ICI AKI -- INPC ETL (v6)")
     print("=" * 70)
     print(f"  Data: {INPC_DATA}")
     print(f"  Output: {RESULTS}/")
@@ -982,6 +1202,7 @@ def run_inpc():
             "condition_concept_id",
             "condition_start_date",
             "condition_source_value",
+            "visit_occurrence_id",
         ],
     )
     print(f"  condition_occurrence: {len(cond):,}")
@@ -989,6 +1210,30 @@ def run_inpc():
     meas = pd.read_csv(f"{INPC_DATA}/r6335_measurement.csv", low_memory=False)
     meas.columns = [c.lower() for c in meas.columns]
     print(f"  measurement: {len(meas):,}")
+
+    # v6: load visit_occurrence for severe visit filtering
+    visit_path = f"{INPC_DATA}/r6335_visit_occurrence.csv"
+    if os.path.exists(visit_path):
+        visit_raw = pd.read_csv(
+            visit_path,
+            low_memory=False,
+            usecols=["visit_occurrence_id", "person_id", "visit_concept_id"],
+        )
+        visit_raw["visit_concept_id"] = pd.to_numeric(
+            visit_raw.visit_concept_id, errors="coerce"
+        )
+        severe_visits = set(
+            visit_raw[
+                visit_raw.visit_concept_id.isin(SEVERE_VISIT_CONCEPTS)
+            ].visit_occurrence_id
+        )
+        print(
+            f"  visit_occurrence: {len(visit_raw):,} (severe: {len(severe_visits):,})"
+        )
+        del visit_raw
+    else:
+        severe_visits = None
+        print("  visit_occurrence: NOT FOUND — accepting all AKI ICD codes")
 
     # ── STEP 1: ICI Cohort ──────────────────────────────────────
     print("\n" + "=" * 70)
@@ -1140,23 +1385,57 @@ def run_inpc():
     consort["excluded_no_baseline"] = consort["ici_cancer"] - consort["has_baseline_cr"]
     print(f"  Excluded ESKD/transplant/baseline>=4: {pre - len(eligible)}")
 
-    # Washout
+    # Cr-based washout
     pre_cr = cr_merged[
         (cr_merged.days_from_ici >= -90) & (cr_merged.days_from_ici <= 0)
     ]
     pre_cr = pre_cr.merge(eligible[["person_id", "baseline_cr"]], on="person_id")
-    washout = set(pre_cr[pre_cr.value_as_number / pre_cr.baseline_cr >= 1.5].person_id)
-    eligible = eligible[~eligible.person_id.isin(washout)].copy()
-    consort["excluded_washout"] = len(washout)
+    washout_cr = set(
+        pre_cr[pre_cr.value_as_number / pre_cr.baseline_cr >= 1.5].person_id
+    )
+    print(f"  Washout Cr-based: {len(washout_cr)}")
+
+    # v6: AKI ICD codes from condition_occurrence
+    elig_pids = set(eligible.person_id)
+    aki_icd_mask = cond.icd_clean.apply(
+        lambda x: (
+            any(str(x).startswith(p) for p in AKI_ICD_NORM) if pd.notna(x) else False
+        )
+    )
+    aki_icd_df = cond[aki_icd_mask & cond.person_id.isin(elig_pids)][
+        ["person_id", "condition_start_date", "visit_occurrence_id"]
+    ].copy()
+    print(
+        f"  AKI ICD records: {len(aki_icd_df):,}, patients: {aki_icd_df.person_id.nunique():,}"
+    )
+
+    icd_first, washout_icd = compute_icd_aki(aki_icd_df, eligible, severe_visits)
+    print(f"  Washout ICD-based: {len(washout_icd)}")
+    print(f"  ICD AKI events (post-ICI): {len(icd_first):,}")
+
+    # v6: Union washout
+    washout_all = washout_cr | washout_icd
+    eligible = eligible[~eligible.person_id.isin(washout_all)].copy()
+    consort["excluded_washout"] = len(washout_all)
+    consort["excluded_washout_cr"] = len(washout_cr)
+    consort["excluded_washout_icd"] = len(washout_icd)
     consort["eligible"] = len(eligible)
-    print(f"  Washout (Cr >=1.5x in 90d pre-ICI): {len(washout)} excluded")
+    print(
+        f"  Washout total: {len(washout_all)} excluded "
+        f"({len(washout_cr)} Cr, {len(washout_icd)} ICD, "
+        f"{len(washout_cr & washout_icd)} overlap)"
+    )
     print(f"  Eligible cohort: {len(eligible):,}")
 
-    eligible = apply_aki_phenotype(eligible, cr_merged)
+    eligible = apply_aki_phenotype(eligible, cr_merged, icd_first)
     cases = eligible.severity.sum()
     consort["cases"] = int(cases)
     consort["controls"] = int(len(eligible) - cases)
-    print(f"  Cases (Cr >=1.5x): {cases:,} ({cases/len(eligible)*100:.1f}%)")
+    consort["cases_12m"] = int(eligible.severity_12m.sum())
+    consort["primary_window_days"] = PRIMARY_WINDOW_DAYS
+    print(
+        f"  Cases ({PRIMARY_WINDOW_DAYS}d primary): {cases:,} ({cases/len(eligible)*100:.1f}%)"
+    )
     print(f"  Controls:          {len(eligible)-cases:,}")
 
     consort_df = pd.DataFrame([consort]).T.reset_index()
@@ -1350,20 +1629,21 @@ def run_inpc():
     print("\n" + "=" * 70)
     print("STEP 6: Regression Base Assembly")
     print("=" * 70)
-    reg = eligible[
-        [
-            "person_id",
-            "severity",
-            "ici_index_date",
-            "baseline_cr",
-            "max_cr_ratio",
-            "max_delta_cr",
-            "aki_delta03",
-            "aki_kdigo2",
-            "aki_kdigo3",
-            "aki_180d",
-        ]
-    ].copy()
+    reg_cols = [
+        "person_id",
+        "severity",
+        "severity_12m",
+        "aki_365d",
+        "ici_index_date",
+        "baseline_cr",
+        "max_cr_ratio",
+        "max_delta_cr",
+        "aki_delta03",
+        "aki_kdigo2",
+        "aki_kdigo3",
+        "evt_source",
+    ]
+    reg = eligible[[c for c in reg_cols if c in eligible.columns]].copy()
     reg = reg.merge(
         demo[
             [
@@ -1391,7 +1671,7 @@ def run_inpc():
     save(reg, "07_pre_matching_base.csv")
 
     print("\n" + "=" * 70)
-    print("INPC ETL COMPLETE (v5)")
+    print("INPC ETL COMPLETE (v6)")
     print("=" * 70)
     print(f"  Next: Rscript 01b_psm.R inpc && Rscript 02_models.R inpc")
 

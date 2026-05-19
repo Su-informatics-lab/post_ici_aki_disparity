@@ -250,8 +250,13 @@ if ("aki_kdigo3" %in% names(regression_bm)) {
 }
 
 # S4: 180-day follow-up window
-if ("aki_180d" %in% names(regression_bm)) {
-  s4 <- run_sensitivity(regression_bm, "aki_180d", "S4_180day")
+# S4: 365-day follow-up window (v6: primary is 180d, so 365d is the extension)
+s4_col <- NULL
+for (candidate in c("aki_365d", "severity_12m", "aki_180d")) {
+  if (candidate %in% names(regression_bm)) { s4_col <- candidate; break }
+}
+if (!is.null(s4_col)) {
+  s4 <- run_sensitivity(regression_bm, s4_col, "S4_365day")
   if (!is.null(s4)) all_sens <- bind_rows(all_sens, s4)
 }
 
