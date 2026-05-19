@@ -1,0 +1,16 @@
+step,n
+total_inpc,57694
+ici_treated,3259
+cancer_pts_total,31108
+ici_cancer,3252
+has_baseline_cr,2763
+baseline_cr_primary,2735
+baseline_cr_fallback,28
+has_followup_cr,2782
+pre_eskd_exclusion,2615
+excluded_eskd,44
+excluded_no_baseline,489
+excluded_washout,190
+eligible,2381
+cases,558
+controls,1823
