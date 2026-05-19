@@ -189,6 +189,11 @@ if (has_ethnicity) base_terms <- c(base_terms, "f.ethnicity")
 if (has_cancer) base_terms <- c(base_terms, "f.cancer")
 if (has_ici) base_terms <- c(base_terms, "f.ici")
 base_terms <- c(base_terms, como_terms, nephro)
+# Baseline eGFR (CKD-EPI 2021, computed from baseline Cr)
+if ("baseline_egfr" %in% names(regression_bm)) {
+  base_terms <- c(base_terms, "baseline_egfr")
+  cat("  Baseline eGFR: included in base model\n")
+}
 
 base_rhs <- paste(c(base_terms, "strata(stratum)"), collapse = " + ")
 base_formula <- as.formula(paste(

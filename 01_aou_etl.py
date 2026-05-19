@@ -958,7 +958,7 @@ for drug_class, agents in NEPHROTOXIN_CLASSES.items():
       AND de.person_id IN ({','.join(str(x) for x in eligible.person_id.tolist())})
       AND de.drug_exposure_start_date
           BETWEEN DATE_SUB(i.ici_date, INTERVAL 90 DAY)
-              AND DATE_ADD(i.ici_date, INTERVAL 90 DAY)
+              AND i.ici_date
     """
     neph_pts = q(neph_sql)
     covariates[drug_class] = covariates.person_id.isin(neph_pts.person_id).astype(int)
@@ -1072,7 +1072,7 @@ print(f"\n  V3 PHENOTYPE RIGOR:")
 print(f"    ✅ Baseline Cr: median [-365,-7] + fallback to last [-365,-1]")
 print(f"    ✅ Pre-ICI AKI washout: Cr ≥1.5× in [-90,0] excluded")
 print(f"    ✅ Cr plausibility: ≥0.1 mg/dL (was >0)")
-print(f"    ✅ Nephrotoxins: ±90d of ICI (was lifetime)")
+print(f"    ✅ Nephrotoxins: [-90, 0] days pre-ICI")
 print(f"    ✅ Baseline eGFR: CKD-EPI 2021 race-free")
 print(f"\n  V2 NCI-CCI FIX SUMMARY:")
 print(f"    ✅ MI scoring: OR logic (max 1pt)")
