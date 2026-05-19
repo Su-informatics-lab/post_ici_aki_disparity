@@ -10,7 +10,11 @@ has_followup_cr,2782
 pre_eskd_exclusion,2615
 excluded_eskd,44
 excluded_no_baseline,489
-excluded_washout,190
-eligible,2381
-cases,558
-controls,1823
+excluded_washout,277
+excluded_washout_cr,190
+excluded_washout_icd,146
+eligible,2294
+cases,459
+controls,1835
+cases_12m,608
+primary_window_days,180
