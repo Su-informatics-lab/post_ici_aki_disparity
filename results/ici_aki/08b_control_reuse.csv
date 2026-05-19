@@ -1,0 +1,9 @@
+metric,value
+n_unique_controls,269
+n_control_rows,400
+median_reuse,1
+iqr_lower,1
+iqr_upper,2
+max_reuse,6
+caliper_sd,0.2
+n_cases_dropped,1
