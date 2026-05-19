@@ -64,10 +64,6 @@ Python 3.10+    pandas, numpy, matplotlib, seaborn
 R 4.5+          survival, MatchIt, cobalt, dplyr, readr
 ```
 
-## Legacy Scripts
-
-`01_aou_etl.py` and `01_inpc_etl.py` are superseded by the consolidated `01_etl.py`.
-
 ## Contact
 
 [Haining Wang](mailto:hw56@iu.edu) · [Jing Su](mailto:su1@iu.edu)
