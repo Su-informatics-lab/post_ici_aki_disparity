@@ -103,12 +103,11 @@ if (has_ethnicity) {
 
 has_cancer <- any(c("cancer_type_collapsed", "cancer_type") %in% names(regression_bm))
 if (has_cancer) {
-  if ("cancer_type_collapsed" %in% names(regression_bm)) {
-    regression_bm$f.cancer <- factor(regression_bm$cancer_type_collapsed,
-      levels = c("Lung", "Melanoma", "Renal_Cell", "Other"))
-  } else {
-    regression_bm$f.cancer <- factor(regression_bm$cancer_type)
-  }
+  cancer_col <- ifelse("cancer_type_collapsed" %in% names(regression_bm),
+                        "cancer_type_collapsed", "cancer_type")
+  regression_bm[[cancer_col]][regression_bm[[cancer_col]] == "Renal_Cell"] <- "Other"
+  regression_bm$f.cancer <- factor(regression_bm[[cancer_col]],
+    levels = c("Lung", "Melanoma", "Other"))
 }
 
 has_ici <- any(c("ici_collapsed", "ici_regimen") %in% names(regression_bm))

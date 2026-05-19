@@ -6,7 +6,9 @@
 # Runs on: AoU Researcher Workbench or Quartz HPC
 #
 # v5 changes:
-#   - Cancer: 4-level (Lung [ref], Melanoma, Renal_Cell, Other)
+#   - Cancer: 3-level (Lung [ref], Melanoma, Other)
+#     v5.1: reverted from 4-level; Renal_Cell collapsed back into Other
+#     (53 AoU pts; not significant in base model; saves 1 df at EPV ~10)
 #   - ICI: 3-level (anti_pd1 [ref], anti_pdl1, ctla4_containing)
 #   - baseline_egfr: EXCLUDED from base model (mediator, not confounder)
 #     NCI-CCI renal disease flag provides coarse CKD adjustment.
@@ -127,15 +129,15 @@ if (has_ethnicity) {
     levels = c("Not_Hispanic", "Hispanic", "Unknown"))
 }
 
-# Cancer type (collapsed to 3)
+# Cancer type (3-level: Lung [ref], Melanoma, Other)
+# v5.1: Renal_Cell collapsed back into Other (saves 1 df)
 has_cancer <- any(c("cancer_type_collapsed", "cancer_type") %in% names(regression_bm))
 if (has_cancer) {
-  if ("cancer_type_collapsed" %in% names(regression_bm)) {
-    regression_bm$f.cancer <- factor(regression_bm$cancer_type_collapsed,
-      levels = c("Lung", "Melanoma", "Renal_Cell", "Other"))
-  } else {
-    regression_bm$f.cancer <- factor(regression_bm$cancer_type)
-  }
+  cancer_col <- ifelse("cancer_type_collapsed" %in% names(regression_bm),
+                        "cancer_type_collapsed", "cancer_type")
+  regression_bm[[cancer_col]][regression_bm[[cancer_col]] == "Renal_Cell"] <- "Other"
+  regression_bm$f.cancer <- factor(regression_bm[[cancer_col]],
+    levels = c("Lung", "Melanoma", "Other"))
 }
 
 # ICI regimen (collapsed to 2)
