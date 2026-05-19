@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Post-ICI AKI × SDoH — AoU ETL (v2 — NCI-CCI scoring fix)
+Post-ICI AKI × SDoH — AoU ETL (v3 — phenotype rigor)
 Runs on AoU Researcher Workbench (Controlled Tier).
 
 Adapted from aou_covid/01_aou_etl.py (Wang et al.)
@@ -8,12 +8,19 @@ Design: study_design_postICI_AKI_SDoH_v2.md
 
 Steps:
   1. ICI-treated cancer patient cohort + AKI phenotyping
-  2. Demographics
-  3. NCI Charlson Comorbidity Index (14 conditions) ← FIXED v2
+  2. Demographics + baseline eGFR (CKD-EPI 2021)
+  3. NCI Charlson Comorbidity Index (14 conditions)
   4. SDoH (Basics Survey)
   5. Cancer type + ICI class + concomitant nephrotoxins
   6. Matching variables
   7. Regression base assembly
+
+PHENOTYPE RIGOR CHANGELOG (v3, harmonized with dualr-graph):
+  - ADDED baseline Cr fallback: median [-365,-7], fallback to last [-365,-1]
+  - ADDED pre-ICI AKI washout: exclude Cr ≥1.5× in [-90, 0] days
+  - FIXED Cr plausibility floor: >= 0.1 mg/dL (was > 0)
+  - FIXED nephrotoxin timing: ±90d of ICI (was any exposure ever)
+  - ADDED baseline eGFR (CKD-EPI 2021 race-free equation)
 
 CCI FIX LOG (v2, 2026-05-16):
   - REMOVED hierarchy pre-processing (zeroing raw flags)
@@ -54,7 +61,7 @@ RESULTS = "results/ici_aki"
 os.makedirs(RESULTS, exist_ok=True)
 
 print("=" * 70)
-print("POST-ICI AKI × SDoH — AoU ETL (v2 — NCI-CCI fix)")
+print("POST-ICI AKI × SDoH — AoU ETL (v3 — phenotype rigor)")
 print("=" * 70)
 print(f"  CDR: {CDR}")
 print(f"  Output: {RESULTS}/")
@@ -174,7 +181,7 @@ SELECT
 FROM `{CDR}.measurement` m
 WHERE m.measurement_concept_id = {cr_concept}
   AND m.value_as_number IS NOT NULL
-  AND m.value_as_number > 0
+  AND m.value_as_number >= 0.1
   AND m.value_as_number < 30
 """
 cr_all = q(cr_sql)
@@ -190,20 +197,40 @@ cr_merged["days_from_ici"] = (
     cr_merged.measurement_date - cr_merged.ici_index_date
 ).dt.days
 
-# Baseline: median Cr in [-365, -7]
-baseline_cr = cr_merged[
-    (cr_merged.days_from_ici >= -365) & (cr_merged.days_from_ici <= -7)
-]
-baseline = (
-    baseline_cr.groupby("person_id")
+# Baseline: median Cr in [-365, -7] with fallback to last Cr [-365, -1]
+# Primary window: stable outpatient window excluding peri-ICI labs
+bl_main = cr_merged[(cr_merged.days_from_ici >= -365) & (cr_merged.days_from_ici <= -7)]
+bl_primary = (
+    bl_main.groupby("person_id")
     .agg(
         baseline_cr=("value_as_number", "median"),
         n_baseline=("value_as_number", "count"),
     )
     .reset_index()
 )
+# Fallback: last available Cr in [-365, -1] for patients without [-365, -7] data
+# This rescues patients who only have labs in the week before ICI initiation
+bl_fallback_pool = cr_merged[
+    (cr_merged.days_from_ici >= -365) & (cr_merged.days_from_ici <= -1)
+].sort_values(["person_id", "days_from_ici"])
+bl_fallback = (
+    bl_fallback_pool.groupby("person_id")
+    .tail(1)[["person_id", "value_as_number"]]
+    .rename(columns={"value_as_number": "baseline_cr"})
+)
+bl_fallback["n_baseline"] = 1
+# Combine: primary where available, fallback for the rest
+pids_primary = set(bl_primary.person_id)
+bl_fallback_only = bl_fallback[~bl_fallback.person_id.isin(pids_primary)]
+baseline = pd.concat([bl_primary, bl_fallback_only], ignore_index=True)
+n_primary = len(bl_primary)
+n_fallback = len(bl_fallback_only)
 print(f"  Patients with baseline Cr: {len(baseline):,}")
+print(f"    Primary [-365, -7] median: {n_primary:,}")
+print(f"    Fallback [-365, -1] last:  {n_fallback:,}")
 consort["has_baseline_cr"] = len(baseline)
+consort["baseline_cr_primary"] = n_primary
+consort["baseline_cr_fallback"] = n_fallback
 
 # Follow-up: Cr in [1, 365]
 followup_cr = cr_merged[
@@ -244,6 +271,21 @@ print(f"  Excluded ESKD/transplant/baseline≥4: {pre_eskd - len(eligible)}")
 print(f"  Eligible cohort: {len(eligible):,}")
 consort["pre_eskd_exclusion"] = pre_eskd
 consort["excluded_eskd"] = pre_eskd - len(eligible)
+
+# ── 1g2. Pre-ICI AKI washout ───────────────────────────────────
+# Exclude patients with Cr ≥1.5× baseline in [-90, 0] days before ICI
+# These have prevalent (not incident) AKI, contaminating the case definition
+pre_ici_cr = cr_merged[
+    (cr_merged.days_from_ici >= -90) & (cr_merged.days_from_ici <= 0)
+]
+pre_ici_cr = pre_ici_cr.merge(eligible[["person_id", "baseline_cr"]], on="person_id")
+pre_ici_cr["pre_ratio"] = pre_ici_cr.value_as_number / pre_ici_cr.baseline_cr
+washout_pids = set(pre_ici_cr[pre_ici_cr.pre_ratio >= 1.5].person_id.tolist())
+pre_washout = len(eligible)
+eligible = eligible[~eligible.person_id.isin(washout_pids)].copy()
+print(f"  Washout (Cr ≥1.5× in 90d pre-ICI): {len(washout_pids)} excluded")
+print(f"  Eligible cohort: {len(eligible):,}")
+consort["excluded_washout"] = len(washout_pids)
 consort["eligible"] = len(eligible)
 
 # ── 1h. AKI phenotyping ──────────────────────────────────────────
@@ -410,6 +452,36 @@ save(
     ],
     "02_demographics.csv",
 )
+
+# ── Baseline eGFR (CKD-EPI 2021 race-free) ─────────────────────
+# eGFR = 142 × min(Scr/κ, 1)^α × max(Scr/κ, 1)^(-1.200) × 0.9938^Age [× 1.012 if F]
+# Standard covariate for any kidney injury study
+print("  Computing baseline eGFR (CKD-EPI 2021 race-free)...")
+egfr_df = demo[["person_id", "sex_at_birth", "age_at_ici"]].merge(
+    eligible[["person_id", "baseline_cr"]], on="person_id"
+)
+scr = egfr_df.baseline_cr.values.astype(np.float64)
+age_arr = egfr_df.age_at_ici.values.astype(np.float64)
+is_female = (egfr_df.sex_at_birth == "Female").values
+kappa = np.where(is_female, 0.7, 0.9)
+alpha = np.where(is_female, -0.241, -0.302)
+scr_over_k = scr / kappa
+egfr_vals = (
+    142
+    * np.power(np.minimum(scr_over_k, 1.0), alpha)
+    * np.power(np.maximum(scr_over_k, 1.0), -1.200)
+    * np.power(0.9938, age_arr)
+    * np.where(is_female, 1.012, 1.0)
+)
+egfr_df["baseline_egfr"] = egfr_vals.astype(np.float32)
+# CKD staging for descriptive reporting
+n_ckd3 = (egfr_vals < 60).sum()
+print(
+    f"    eGFR: median={np.nanmedian(egfr_vals):.1f}, "
+    f"IQR=[{np.nanpercentile(egfr_vals, 25):.1f}, {np.nanpercentile(egfr_vals, 75):.1f}], "
+    f"<60 (CKD ≥3): {n_ckd3} ({n_ckd3/len(egfr_df)*100:.1f}%)"
+)
+demo = demo.merge(egfr_df[["person_id", "baseline_egfr"]], on="person_id", how="left")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -870,12 +942,23 @@ NEPHROTOXIN_CLASSES = {
 
 for drug_class, agents in NEPHROTOXIN_CLASSES.items():
     agent_likes = " OR ".join([f"LOWER(c.concept_name) LIKE '%{a}%'" for a in agents])
+    # Time-windowed: ±90 days of first ICI exposure ("concurrent" per manuscript)
     neph_sql = f"""
+    WITH ici_dates AS (
+      SELECT person_id, MIN(drug_exposure_start_date) AS ici_date
+      FROM `{CDR}.drug_exposure`
+      WHERE drug_concept_id IN ({','.join(str(x) for x in ici_concept_ids)})
+      GROUP BY person_id
+    )
     SELECT DISTINCT de.person_id
     FROM `{CDR}.drug_exposure` de
     JOIN `{CDR}.concept` c ON c.concept_id = de.drug_concept_id
+    JOIN ici_dates i ON i.person_id = de.person_id
     WHERE ({agent_likes})
       AND de.person_id IN ({','.join(str(x) for x in eligible.person_id.tolist())})
+      AND de.drug_exposure_start_date
+          BETWEEN DATE_SUB(i.ici_date, INTERVAL 90 DAY)
+              AND DATE_ADD(i.ici_date, INTERVAL 90 DAY)
     """
     neph_pts = q(neph_sql)
     covariates[drug_class] = covariates.person_id.isin(neph_pts.person_id).astype(int)
@@ -950,7 +1033,9 @@ reg = eligible[
     ]
 ].copy()
 reg = reg.merge(
-    demo[["person_id", "sex_at_birth", "race", "ethnicity", "age_group"]],
+    demo[
+        ["person_id", "sex_at_birth", "race", "ethnicity", "age_group", "baseline_egfr"]
+    ],
     on="person_id",
 )
 reg = reg.merge(charlson, on="person_id")
@@ -968,18 +1053,28 @@ print(
     f"IQR {reg.charlson_score.quantile(0.25):.0f}–{reg.charlson_score.quantile(0.75):.0f}"
 )
 print(f"  NCI index: median {reg.nci_index.median():.3f}")
+print(
+    f"  eGFR: median {reg.baseline_egfr.median():.1f}, "
+    f"<60: {(reg.baseline_egfr < 60).sum()} ({(reg.baseline_egfr < 60).mean()*100:.1f}%)"
+)
 
 save(reg, "07_pre_matching_base.csv")
 
 
 # ═══════════════════════════════════════════════════════════════════
 print("\n" + "=" * 70)
-print("AoU ETL COMPLETE (v2 — NCI-CCI scoring fix)")
+print("AoU ETL COMPLETE (v3 — phenotype rigor)")
 print("=" * 70)
 print(f"  Output: {RESULTS}/")
 print(f"  Next:   Rscript 01b_psm.R ici_aki")
 print(f"          Rscript 02_models.R ici_aki")
-print(f"\n  NCI-CCI FIX SUMMARY:")
+print(f"\n  V3 PHENOTYPE RIGOR:")
+print(f"    ✅ Baseline Cr: median [-365,-7] + fallback to last [-365,-1]")
+print(f"    ✅ Pre-ICI AKI washout: Cr ≥1.5× in [-90,0] excluded")
+print(f"    ✅ Cr plausibility: ≥0.1 mg/dL (was >0)")
+print(f"    ✅ Nephrotoxins: ±90d of ICI (was lifetime)")
+print(f"    ✅ Baseline eGFR: CKD-EPI 2021 race-free")
+print(f"\n  V2 NCI-CCI FIX SUMMARY:")
 print(f"    ✅ MI scoring: OR logic (max 1pt)")
 print(f"    ✅ Paralysis/CVD: independent scoring")
 print(f"    ✅ No hierarchy pre-processing (raw flags preserved)")
